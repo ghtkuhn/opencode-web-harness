@@ -29,6 +29,7 @@ type RunMechanicalDoctorOptions = {
   timeoutMs: number
   maxOutputBytes?: number
   abortSignal?: AbortSignal
+  preflightOnly?: boolean
 }
 
 const DEFAULT_MAX_OUTPUT_BYTES = 20 * 1024 * 1024
@@ -53,6 +54,10 @@ export function runMechanicalDoctorVerify(options: RunMechanicalDoctorOptions): 
     const child = spawn("node", ["scripts/task-doctor.mjs", "verify", options.taskPath], {
       cwd: options.root,
       detached: process.platform !== "win32",
+      env: {
+        ...process.env,
+        ...(options.preflightOnly ? { TASK_DOCTOR_PREFLIGHT: "1" } : {}),
+      },
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
     })
@@ -139,10 +144,10 @@ export function validateMechanicalDoctorRun(run: MechanicalDoctorRun): Validated
     throw new Error(`Mechanical Doctor verify ${transportProblems.join(", ")}.`)
   }
 
-  const statuses = [...run.output.matchAll(/(?:^|\n)TASK DOCTOR:\s+(FAIL|PASS|EXECUTOR RECOVERY REQUIRED)\s*(?=\n|$)/g)]
+  const statuses = [...run.output.matchAll(/(?:^|\n)TASK DOCTOR:\s+(PREFLIGHT PASS|FAIL|PASS|EXECUTOR RECOVERY REQUIRED)\s*(?=\n|$)/g)]
   const marker = statuses.at(-1)?.[1]
   if (!marker) throw new Error("Mechanical Doctor verify returned no terminal TASK DOCTOR status.")
-  const status: MechanicalDoctorStatus = marker === "PASS"
+  const status: MechanicalDoctorStatus = marker === "PASS" || marker === "PREFLIGHT PASS"
     ? "pass"
     : marker === "FAIL" ? "fail" : "executor_recovery_required"
   const exitMatches = status === "pass" ? run.exitCode === 0 : run.exitCode !== null && run.exitCode !== 0

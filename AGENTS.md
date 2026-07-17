@@ -16,7 +16,7 @@
 * Planner analyzes the request, reads project evidence, and registers tasks. Planner does not implement or delegate.
 * Harness updates use the explicit project CLI `npm run harness:update`; natural-language keywords do not authorize or prioritize that operation automatically.
 * Executor schedules registered tasks, delegates one exact ready task, advances technical recovery, and completes a technically verified task. Executor does not implement or grade the result.
-* Worker is the code implementer. Worker implements the delegated task by changing the required in-scope project files through the Doctor lifecycle; it does not merely verify or hand unchanged implementation work to Executor. Worker does not rewrite task definitions or complete tasks.
+* Worker implements delegated tasks in mutable Scope. Verification does not replace implementation. Worker does not rewrite tasks or complete them.
 * Planner and Executor do not read Worker rule files. Worker does not repair Harness state or unrelated project Memory.
 
 # Planning
@@ -34,7 +34,7 @@
 * Treat Doctor state and its exact next action as authoritative.
 * Start the registered task before the first change. Resume an active task without restarting its lifecycle.
 * Worker changes files only through one flat `preview_worker_changes` operation followed by zero-argument `apply_worker_changes` or `discard_worker_changes`.
-* The Harness runs verification after Apply. Call zero-argument `verify_worker_task` only when a tool result explicitly requests the fallback.
+* Mutable tasks remain started after preflight. Apply runs final verification. Call zero-argument `verify_worker_task` only when requested.
 * After Doctor PASS, Worker returns `REVIEWABLE` and stops. Executor calls zero-argument `submit_task_review`, which performs only the hash-bound technical completion transition.
 * Use the dedicated recovery tool named by the Harness. Do not substitute prose, direct file mutation, or a different lifecycle command.
 * Stop and request the named owner when no technically valid in-scope operation remains.

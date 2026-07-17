@@ -290,6 +290,13 @@ function canonicalPlannerDoctorCommand(command: string) {
   return gate && tasks.length === 1 ? `npm run task:doctor:${gate} -- ${tasks[0]}` : null
 }
 
+function stripProjectCdPrefix(root: string, command: string) {
+  const match = command.trim().match(/^cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))\s*&&\s*(.+)$/s)
+  if (!match) return command
+  const directory = match[1] ?? match[2] ?? match[3]
+  return resolve(directory) === resolve(root) ? match[4].trim() : command
+}
+
 function canonicalPlannerPackageScriptsCommand(root: string, command: string) {
   const value = command.trim()
   if (/[;&|><`\n]|\$\(/.test(value)) return null
@@ -806,7 +813,7 @@ function authoritativeWorkflowState(root: string) {
   } else if (doctorStatus === "passed" && doctorTask) {
     nextAction = "Executor must call submit_task_review without arguments; the Harness completes the hash-bound technically verified task mechanically."
   } else if (openTasks.length > 0) {
-    nextAction = `For an explicitly requested batch, start ${openTasks[0]} through the Doctor lifecycle. Otherwise follow the current explicit user request.`
+    nextAction = "Executor must run npm run task:doctor:schedule and delegate its READY task. Worker starts it."
   } else {
     nextAction = "No automatic continuation. Follow the current explicit user request; otherwise stop and wait."
   }
@@ -1164,8 +1171,8 @@ function canonicalWorkerPrompt(root: string, taskPath: string, state: any, revie
   const taskContent = existsSync(resolve(root, taskPath)) ? readFileSync(resolve(root, taskPath), "utf8") : ""
   const configuredFamily = configuredWorkerModelFamily(root, selectedModel)
   const ruleInstruction = configuredFamily?.requireRead
-    ? `Strict read order: first read WORKER.md, ${configuredFamily.rulesFile}, and the exact task (those three may be read in any order). Only after all three, read any Guard-named finding target before another implementation file. Do not preview a target until its complete current contents were read.`
-    : "Strict read order: first read WORKER.md, every Guard-named model-family file, and the exact task (those reads may occur in any order). Only after all required rule/task reads, read any Guard-named finding target before another implementation file. Do not preview a target until its complete current contents were read."
+    ? `Read first: WORKER.md, ${configuredFamily.rulesFile}, task.`
+    : "Read first: WORKER.md, Guard-named model rules, task."
   const memoryAction = active
     ? state.memoryAction
     : taskContent.match(/^Action:\s+`?(none|append|update|remove)`?\s*$/m)?.[1]
@@ -1173,59 +1180,52 @@ function canonicalWorkerPrompt(root: string, taskPath: string, state: any, revie
     ? [
         "ACTIVE TASK RESUME",
         `Task: ${taskPath}`,
-        "You are the code implementer for this task. Implement its concrete done facts yourself by changing the required in-scope project files. Do not merely verify, summarize, or return unchanged work for review.",
-        "A passing preflight or verification command before the required implementation is not task completion. Unless the task explicitly requires only inspection or verification, make the implementation changes before returning REVIEWABLE.",
+        "Implement the task in mutable Scope. Preflight is not completion.",
         ruleInstruction,
-        "This task is already TASK DOCTOR: STARTED. Begin now; do not wait for another STARTED message.",
-        "Do not run Doctor lint, register, start, or schedule.",
+        "Already STARTED. Do not lint, register, start, or schedule.",
         targetedReviewedRetry
-          ? "The Executor review below is the authoritative preflight for this fresh retry. Do not rerun Doctor verify before the first correction."
-          : "After the required reads, inspect one exact in-scope implementation file. If a fresh preflight is needed, the Harness runs Doctor verify mechanically before that read; do not issue a separate Doctor command.",
+          ? "Use the review below; do not verify before the first correction."
+          : "Inspect mutable Scope. Read an existing target before Preview. Harness runs preflight.",
         targetedReviewedRetry
-          ? `${reviewedTarget ? `After the required rule/task reads, read ${reviewedTarget} as the first implementation file. ` : "After the required rule/task reads, inspect the first exact finding target. "}Only then inspect related in-scope causes or preview one justified file. The Apply tool runs Doctor verify mechanically and returns the exact next result.`
-          : "Use the exact mechanical Doctor findings. Read the first named in-scope file before inspecting related in-scope causes. Apply one justified file; the Apply tool verifies it and returns the exact next result before another change.",
+          ? `Read ${reviewedTarget ?? "the finding target"} first. Then Preview/Apply one file.`
+          : "Follow Guard. Preview/Apply one file.",
       ].join("\n")
     : [
         "REGISTERED TASK EXECUTION",
         `Task: ${taskPath}`,
-        "You are the code implementer for this task. Implement its concrete done facts yourself by changing the required in-scope project files. Do not merely verify, summarize, or return unchanged work for review.",
-        "A passing preflight or verification command before the required implementation is not task completion. Unless the task explicitly requires only inspection or verification, make the implementation changes before returning REVIEWABLE.",
+        "Implement the task in mutable Scope. Preflight is not completion.",
         ruleInstruction,
-        `Run npm run task:doctor:start -- ${taskPath} before implementation.`,
-        "After STARTED, inspect one exact in-scope implementation file. The Harness runs the initial Doctor verify mechanically before that read.",
-        "Use the exact mechanical Doctor findings. Read the first named in-scope file before inspecting related in-scope causes. Apply one justified file; the Apply tool verifies it and returns the exact next result.",
+        `Start: npm run task:doctor:start -- ${taskPath}`,
+        "Inspect mutable Scope. Read an existing target before Preview. Follow Guard. Preview/Apply one file.",
       ].join("\n")]
 
   if (configFor(root).transactionalWorkerChanges) {
     sections.push([
       "TRANSACTIONAL PROJECT CHANGES",
-      "Do not call write, edit, patch, mutating shell commands, or mutation scripts.",
-      "Use preview_worker_changes with one flat exact in-scope operation. Inspect the diff, then call apply_worker_changes without arguments.",
-      "For replace, provide exact old_text and new_text. expected_occurrences defaults safely to 1 when omitted.",
-      "Each preview may target exactly one project file; several deterministic operations for that file are allowed. Apply it before preparing another file.",
-      "Search may identify repeated targets, but do not combine multiple project files in one preview.",
+      "Mutate only through Preview/Apply.",
+      "Preview one file, then zero-argument Apply. Use zero-argument Discard only when Preview requires it.",
+      "Call the next required tool; do not announce it.",
     ].join("\n"))
   }
 
   if (memoryAction === "append") {
     sections.push([
       "MEMORY APPEND",
+      `Before first Apply, call append_task_memory once for ${taskPath} with one concise durable fact.`,
       "Do not edit MEMORY.md directly.",
-      `After inspecting the first valid implementation preview and before its first apply_worker_changes call, call append_task_memory exactly once for ${taskPath}. The subsequent Apply tool includes the memory append in its mechanical Doctor verification.`,
-      "Pass one concise durable fact without a bullet or timestamp. The tool restores the Doctor baseline, timestamps the fact, and appends it atomically.",
-      "After Doctor PASS, return REVIEWABLE immediately. Do not call the memory tool or verify again.",
     ].join("\n"))
   }
 
   if (reviewedHelp?.status === "retry_approved") {
-    sections.push([
-      `REVIEWED WORKER HELP ${reviewedHelp.id}`,
-      `Root cause: ${reviewedHelp.executorReview?.rootCause ?? reviewedHelp.problem}`,
-      `Retry strategy: ${reviewedHelp.executorReview?.retryStrategy ?? "Read the current task and source state, then choose a different safe approach."}`,
-      "Expected results:",
-      ...(reviewedHelp.executorReview?.expectedResults ?? ["Resolve the recorded blocker and pass the task's exact Doctor verification."]).map((result) => `- ${result}`),
-      "Choose implementation details yourself. Do not repeat the terminal Worker's failed approach.",
-    ].join("\n"))
+    const earlyStop = reviewedHelp.category === "invalid-worker-return"
+      || reviewedHelp.category === "reviewed-retry-incomplete"
+    sections.push(earlyStop
+      ? `RETRY ${reviewedHelp.id}\nPrior Worker stopped early. Continue with tools; do not announce actions.`
+      : [
+          `RETRY ${reviewedHelp.id}`,
+          `Problem: ${reviewedHelp.executorReview?.rootCause ?? reviewedHelp.problem}`,
+          `Action: ${reviewedHelp.executorReview?.retryStrategy ?? "Use a different in-scope operation."}`,
+        ].join("\n"))
   } else if (reviewedHelp?.status === "task_changed") {
     sections.push([
       `TASK REVISION RESOLVED ${reviewedHelp.id}`,
@@ -1237,11 +1237,9 @@ function canonicalWorkerPrompt(root: string, taskPath: string, state: any, revie
 
   sections.push([
     "TERMINAL RETURN CONTRACT",
-    `After you have implemented the task and TASK DOCTOR: PASS is reported for ${taskPath}, return only REVIEWABLE and the exact Task path. Do not run Doctor complete.`,
-    "Never use REVIEWABLE to ask Executor to implement, decide, or inspect work you did not perform.",
-    "If Doctor cannot pass, return BLOCKED with Task, Doctor status, Failure, and Required owner.",
-    "For TASK DOCTOR: EXECUTOR RECOVERY REQUIRED, set Required owner: Executor and stop. Do not restore Harness files, retry verify, or escalate to Planner.",
-    "Never substitute manual verification for Doctor PASS.",
+    `After final PASS: REVIEWABLE\nTask: ${taskPath}`,
+    "If impossible: BLOCKED with Task, status, failure, owner.",
+    "Executor owns Harness recovery and complete.",
   ].join("\n"))
 
   return sections.join("\n\n")
@@ -1505,6 +1503,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
   const plannerQuestionCorrections = new Map<string, string>()
   const plannerCompletionCorrections = new Map<string, string>()
   const plannerEmptyStopRecoveries = new Map<string, number>()
+  const executorReadyAfterSchedule = new Map<string, string>()
   const pendingGuardLearnings = new Map<string, Map<string, GuardViolation>>()
   const guardLearningPromptedFor = new Map<string, string>()
   const workerRuleReads = new Map<string, Set<string>>()
@@ -4419,17 +4418,20 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
     sessionID: string,
     state: { taskPath: string; taskHash: string },
     abortSignal?: AbortSignal,
+    preflightOnly = false,
   ) {
     await log("info", "Starting mechanical Worker Doctor verify", {
       sessionID,
       task: state.taskPath,
       taskHash: state.taskHash,
+      preflightOnly,
     })
     const run = validateMechanicalDoctorRun(await runMechanicalDoctorVerify({
       root,
       taskPath: state.taskPath,
       timeoutMs: doctorVerifyTimeoutMs,
       abortSignal,
+      preflightOnly,
     }))
     const latest = activeState(root)
     if (latest?.taskPath !== state.taskPath || latest?.taskHash !== state.taskHash) {
@@ -4442,6 +4444,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       status: run.status,
       exitCode: run.exitCode,
       elapsedMs: run.elapsedMs,
+      preflightOnly,
     })
     return run
   }
@@ -4462,7 +4465,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       if (workerMutationRevision !== expectedMutationRevision) {
         throw new Error("A Worker change was applied while the mechanical preflight was queued; retry against the current project revision.")
       }
-      const run = await executeMechanicalDoctorVerify(sessionID, state)
+      const run = await executeMechanicalDoctorVerify(sessionID, state, undefined, true)
       if (workerMutationRevision !== expectedMutationRevision) {
         throw new Error("A Worker change was applied during the mechanical preflight; its evidence was discarded.")
       }
@@ -4872,6 +4875,13 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       : { active: false, cleared: false }
 
     if (run.status === "pass") {
+      if (source === "initial_preflight") {
+        sessionFeedback.set(sessionID, [
+          run.output,
+          "Task remains started. Read mutable Scope; Preview/Apply. Do not return REVIEWABLE.",
+        ].join("\n\n"))
+        return { failed: false, findingTarget, terminal: false, helpID: null, boostCleared: false }
+      }
       const evidence = doctorEvidence.get(sessionID) ?? new Set<string>()
       evidence.add("verify")
       doctorEvidence.set(sessionID, evidence)
@@ -5570,15 +5580,8 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
     const agent = String(violation.agent ?? sessionAgents.get(sessionID) ?? "").toLowerCase()
     if (!agent || hasGuardLearning(violation.id, agent)) return false
     const canonicalRule = knownStableGuardRule(violation.id)
-    if (canonicalRule) {
-      recordGuardLearningFile(violation.id, agent)
-      return false
-    }
-    const pending = pendingGuardLearnings.get(sessionID) ?? new Map<string, GuardViolation>()
-    pending.set(`${agent}:${violation.id}`, { ...violation, agent })
-    pendingGuardLearnings.set(sessionID, pending)
-    persistPendingGuardLearnings()
-    return true
+    if (canonicalRule) recordGuardLearningFile(violation.id, agent)
+    return false
   }
 
   function pendingGuardLearningsForAgent(sessionID: string, agent = sessionAgents.get(sessionID) ?? "") {
@@ -6369,6 +6372,11 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
           workerHelpSynthesized: true,
           workerHelpID: help.id,
         }
+      } else if (requiredOwner === "Executor") {
+        resultText = [
+          resultText,
+          "EXECUTOR NEXT ACTION: Run npm run task:doctor:schedule and delegate its READY task to a fresh Worker. Do not read Worker rules or announce the action.",
+        ].join("\n\n")
       }
       output.output = replaceWorkerTaskResult(output.output, workerSessionID, resultText)
       output.metadata = {
@@ -6622,14 +6630,23 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
                 ? `Executor must call escalate_to_planner now with only task_path=${currentPlannerRecoveryRequest.taskPath}. The pending frozen receipt restores every other field mechanically; do not reconstruct or add them. Do not schedule or delegate until it returns PLANNER RECOVERY COMPLETE.`
                 : `Executor must call escalate_to_planner for ${currentPlannerRecoveryRequest.taskPath} now with file-backed evidence and the exact recovery contract from the current user request. Do not schedule or delegate until it returns PLANNER RECOVERY COMPLETE.`
               : undefined)
+    const agent = sessionAgents.get(sessionID) ?? ""
+    const scheduledReady = executorReadyAfterSchedule.get(sessionID)
+    const scheduledReadyNextAction = modeSettings.executorAgents.has(agent) && scheduledReady
+      ? `Executor must delegate ${scheduledReady} to one fresh Worker now. Do not schedule again or mention Worker rules.`
+      : undefined
+    const workerNextAction = modeSettings.workerAgents.has(agent)
+      && currentState?.status !== "started"
+      && currentState?.status !== "passed"
+      ? "Worker must follow its exact task prompt; never schedule."
+      : undefined
     const liveState = features.authoritativeContinuationState
       ? authoritativeWorkflowStateText(
           root,
-          helpReviewNextAction,
+          helpReviewNextAction ?? scheduledReadyNextAction ?? workerNextAction,
           activePlannerRecovery ? `active trusted recovery for ${activePlannerRecovery.taskPath}` : undefined,
         )
       : null
-    const agent = sessionAgents.get(sessionID) ?? ""
     const terminalWorkerHarnessRecovery = features.executorBaselineRecovery
       && modeSettings.workerAgents.has(agent)
       && (taskHarnessRecoveryStatus(root) !== null || workerHarnessRecoveryTerminals.has(sessionID))
@@ -6988,8 +7005,8 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
               result.diffTruncated ? "The bounded diff was truncated. Discard this change set and split it before applying." : null,
               result.diff,
               result.diffTruncated
-                ? `Call discard_worker_changes with ${result.id}.`
-                : "Inspect this exact diff. Apply the latest pending preview unchanged by calling apply_worker_changes without arguments, or discard it.",
+                ? "NEXT: call zero-argument discard_worker_changes."
+                : "NEXT: call zero-argument apply_worker_changes. Do not end first.",
             ].filter(Boolean).join("\n\n"),
             metadata: { changeID: result.id, previewToken: result.previewToken, task: result.taskPath, paths: result.paths, diffTruncated: result.diffTruncated },
           }
@@ -7153,7 +7170,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
         },
       }),
       verify_worker_task: tool({
-        description: "Run the exact active Worker task Doctor verification inside the trusted project queue. Takes no arguments and is the only transactional Worker fallback after a mechanical verify transport failure. If verification is already current, returns the current next action without rerunning Doctor.",
+        description: "Run active Worker verification. Takes no arguments. Use only when Guard requests it.",
         args: {},
         async execute(_args, context) {
           _args = await checkedModelArgs("verify_worker_task", _args, context.sessionID, true, context) as typeof _args
@@ -7228,12 +7245,14 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
               }
             }
             const expectedMutationRevision = workerMutationRevision
+            const mutableScope = scopeFromTask(root, state.taskPath).paths
+            const preflightOnly = preflightRetry && !postApplyRetry && mutableScope.length > 0
             let run: ValidatedMechanicalDoctorRun
             try {
               run = await executeMechanicalDoctorVerify(context.sessionID, {
                 taskPath: state.taskPath,
                 taskHash: state.taskHash,
-              }, context.abort)
+              }, context.abort, preflightOnly)
             } catch (error) {
               workerVerifyRequired.add(context.sessionID)
               const message = error instanceof Error ? error.message : String(error)
@@ -7249,7 +7268,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
               context.sessionID,
               { taskPath: state.taskPath, taskHash: state.taskHash },
               run,
-              postApplyRetry ? "post_apply" : "initial_preflight",
+              preflightOnly ? "initial_preflight" : "post_apply",
               expectedMutationRevision,
             )
             const metadata = {
@@ -7266,6 +7285,12 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
                 run.output,
                 observation.terminal
                   ? "This Doctor result is terminal for Worker. End with the canonical BLOCKED or HELP_REQUESTED handoff now."
+                  : run.status === "pass" && preflightOnly
+                    ? [
+                        `Task: ${state.taskPath}`,
+                        "Task remains started. Do not return REVIEWABLE.",
+                        `Next: read mutable Scope (${mutableScope.join(", ")}), then Preview/Apply.`,
+                      ].join("\n")
                   : run.status === "pass"
                     ? "Doctor PASS is authoritative. Return REVIEWABLE now; do not inspect or change another file."
                     : observation.findingTarget
@@ -8894,6 +8919,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
     "chat.message": async ({ sessionID, agent, model }, output) => {
       if (enabled) scheduleWorkerSessionMaintenance(sessionID)
       rememberSessionIdentity(sessionID, { agent }, model)
+      repetitions.delete(sessionID)
       terminalRoleLoopReasons.delete(sessionID)
       await initializeReviewedWorkerRetry(sessionID)
       await initializeStagedHelpDelegation(sessionID)
@@ -9029,7 +9055,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
         else if (plannerAppCommand.test(repairableCommand)) output.args.command = repairableCommand
       }
       if (workerMode && input.tool === "bash") {
-        const canonical = canonicalWorkerDoctorCommand(rawCommand)
+        const canonical = canonicalWorkerDoctorCommand(stripProjectCdPrefix(root, rawCommand))
         if (canonical) output.args.command = canonical
         const state = activeState(root)
         const preflightRequired = state?.status === "started"
@@ -9054,8 +9080,9 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
         const strippedCommand = stripHarmlessOutputSuffix(rawCommand)
         const repairedScript = canonicalUniqueNpmScript(strippedCommand, projectNpmScriptNames(root))
         const repairableCommand = repairedScript ?? strippedCommand
-        if (/^npm\s+run\s+task:doctor:schedule\s*$/.test(repairableCommand)) {
+        if (doctorCommandMention.test(repairableCommand)) {
           output.args.command = "npm run task:doctor:schedule"
+          output.args.workdir = root
         }
       }
       if (input.tool === "bash" && isDoctorCommand(String(output.args?.command ?? ""))) {
@@ -9174,7 +9201,12 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       const workerRulesTarget = paths.find((path) => workerRulesPath.test(path))
         ?? command.match(/(?:^|[\s'"/])(WORKER(?:-[A-Za-z0-9._-]+)?\.md)(?=$|[\s'";])/i)?.[1]
 
-      if ((plannerMode || executorMode) && workerRulesTarget && input.tool !== "recover_harness_baseline") {
+      const canonicalWorkerDelegation = executorMode
+        && input.tool === "task"
+        && workerSubagentType(output.args?.subagent_type)
+      if ((plannerMode || executorMode) && workerRulesTarget
+        && input.tool !== "recover_harness_baseline"
+        && !canonicalWorkerDelegation) {
         throw projectGuardError(input.sessionID,
           `${workerRulesTarget} is Worker-only system context and is opaque to ${plannerMode ? "Planner" : "Executor"}.`,
           "Do not read this file. For Harness recovery, pass its exact Doctor-reported path to recover_harness_baseline; the trusted tool validates hashes without exposing content.",
@@ -9357,7 +9389,11 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
         }
       }
 
-      if (features.repetitionDetector) {
+      const redundantExecutorSchedule = executorMode
+        && input.tool === "bash"
+        && /^npm\s+run\s+task:doctor:schedule\s*$/.test(command)
+        && executorReadyAfterSchedule.has(input.sessionID)
+      if (features.repetitionDetector && !redundantExecutorSchedule) {
         const signature = JSON.stringify([input.tool, output.args])
         const previous = repetitions.get(input.sessionID)
         const count = previous?.signature === signature ? previous.count + 1 : 1
@@ -10175,6 +10211,17 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
         })
         return
       }
+      if (modeSettings.executorAgents.has(agent)
+        && input.tool === "bash"
+        && /^npm\s+run\s+task:doctor:schedule\s*$/.test(command)) {
+        const ready = String(output.output ?? "").match(/^TASK DOCTOR: READY\s+(kanban\/todo\/[A-Za-z0-9._-]+\.md)$/m)?.[1]
+        if (ready) executorReadyAfterSchedule.set(input.sessionID, ready)
+        else executorReadyAfterSchedule.delete(input.sessionID)
+        const next = ready
+          ? `delegate ${ready} to one fresh Worker. Use only the exact task path; do not mention Worker rules or run schedule again.`
+          : "stop because no task is READY."
+        output.output = `${String(output.output ?? "").trimEnd()}\n\nNEXT: ${next}`
+      }
       const fullFileReadRequest = input.tool === "read"
         && safeArgs.offset === undefined
         && safeArgs.limit === undefined
@@ -10228,6 +10275,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       try {
         await validateWorkerTaskReturn(safeInput, output)
         if (input.tool === "task" && workerSubagentType(safeArgs.subagent_type)) {
+          executorReadyAfterSchedule.delete(input.sessionID)
           const terminalWorkerSessionID = workerTaskSessionID(output)
           if (terminalWorkerSessionID) {
             await confirmStagedHelpDelegations(input.sessionID, terminalWorkerSessionID, input.callID)
@@ -10254,12 +10302,28 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
         if (input.tool !== "read" || fullFileRead) {
           for (const path of workerRuleFilesReadByTool(input.sessionID, paths, command)) markWorkerRuleRead(input.sessionID, path)
         }
+        const readRequiredRule = fullFileRead && paths.length === 1
+          && requiredWorkerRuleFiles(input.sessionID).includes(paths[0])
+        if (readRequiredRule) {
+          const remainingRules = missingWorkerRuleFiles(input.sessionID)
+          const state = activeState(root)
+          const next = remainingRules[0]
+            ? `read ${remainingRules[0]}`
+            : state?.status === "started" && typeof state.taskPath === "string"
+              ? `read ${state.taskPath}`
+              : "read the exact task from the current prompt"
+          output.output = `${String(output.output ?? "").trimEnd()}\n\nNEXT: ${next}. Do not end first.`
+        }
         if (fullFileRead) {
           const state = activeState(root)
           for (const path of paths) markWorkerTaskRead(input.sessionID, path)
           for (const path of paths) markWorkerFileRead(input.sessionID, path, state)
           const findingTarget = workerFindingTargets.get(input.sessionID)
           if (findingTarget && paths.includes(findingTarget)) workerFindingReads.set(input.sessionID, findingTarget)
+          if (paths.length === 1 && planningPath.test(paths[0])
+            && state?.status !== "started" && state?.status !== "passed") {
+            output.output = `${String(output.output ?? "").trimEnd()}\n\nNEXT: run the exact Start command from the current prompt. Do not end first.`
+          }
         }
       }
       if (modeSettings.executorAgents.has(agent)

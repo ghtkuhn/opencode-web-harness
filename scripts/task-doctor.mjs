@@ -1226,6 +1226,7 @@ function registerTestFile(taskPath, filePath) {
 }
 
 function verify(taskPath) {
+    const preflightOnly = process.env.TASK_DOCTOR_PREFLIGHT === '1';
     const state = readState();
     if (state.status !== 'started') fail([`INVALID_STATE: expected started, found ${state.status}`]);
     const task = parseTask(taskPath);
@@ -1314,7 +1315,7 @@ function verify(taskPath) {
     if (postErrors.length > 0) fail(postErrors);
 
     const changedFiles = taskRelevantChangedPaths(state.snapshot, verifiedSnapshot, task);
-    if (!hasTechnicalOperationEvidence({ changedFiles, commands: commandResults })) {
+    if (!preflightOnly && !hasTechnicalOperationEvidence({ changedFiles, commands: commandResults })) {
         fail(['NO_TECHNICAL_OPERATION: PASS requires at least one in-scope changed path or one successful Verify command']);
     }
 
@@ -1322,6 +1323,17 @@ function verify(taskPath) {
     const executorRecovery = projectMemoryLimit
         ? { status: 'required', owner: 'executor', ...projectMemoryLimit }
         : null;
+    if (preflightOnly) {
+        console.log('TASK DOCTOR: PREFLIGHT PASS');
+        if (executorRecovery) {
+            console.log('TASK DOCTOR: EXECUTOR RECOVERY REQUIRED');
+            console.log(`- ${memoryRecoveryMessage(executorRecovery)}`);
+            console.log('- RECOVERY_OWNER: Executor must call recover_project_memory before implementation. Worker must not edit MEMORY.md.');
+        }
+        console.log(`TASK DOCTOR: MEMORY ${task.memoryAction}`);
+        console.log(`Changed files: ${changedFiles.length ? changedFiles.join(', ') : '(none)'}`);
+        return;
+    }
     const report = {
         version: 2,
         status: 'passed',
