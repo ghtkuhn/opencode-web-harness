@@ -2,6 +2,7 @@
   "name": "opencode-web-harness",
   "private": true,
   "scripts": {
+    "setup": "npm ci && npm --prefix code/backend ci && npm --prefix code/frontend ci && npm --prefix .opencode ci",
     "app:status": "node scripts/app-control.mjs status",
     "app:start": "node scripts/app-control.mjs start",
     "app:stop": "node scripts/app-control.mjs stop",

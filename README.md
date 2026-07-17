@@ -4,6 +4,24 @@ OpenCode Web Harness is a reusable web-application template. The repository comb
 
 The workflow is model-independent. Providers and models are not hard-coded. Planner, Executor, and Worker may use the same or different OpenCode models as long as those models can call the required tools reliably.
 
+## Quick Start
+
+Create a project from the repository and install its locked dependencies:
+
+```bash
+git clone https://github.com/ghtkuhn/opencode-web-harness.git my-app
+cd my-app
+npm run setup
+```
+
+Set the application `name`, ports, and optional agent models in `project.json`, then start the app:
+
+```bash
+npm run app:start
+```
+
+Open the project in OpenCode, give the requirement to Planner, and continue with Executor after Planner has registered the tasks. See [Setup](#setup), [Configuration](#configuration), and [Recommended Usage](#recommended-usage) for the available options.
+
 ## What It Does
 
 - Backend with Express, Kysely, SQLite, and TypeScript
@@ -16,39 +34,15 @@ The workflow is model-independent. Providers and models are not hard-coded. Plan
 - Git-free Harness updates from versioned GitHub releases
 - Project-wide Memory, Custom, and Worker rules
 
-## Project Structure
-
-| Path | Purpose |
-| --- | --- |
-| `code/backend` | Backend application and backend tests |
-| `code/frontend` | Frontend application and browser E2E tests |
-| `code/database` | Local persistent data |
-| `kanban/TASK.md` | Minimal model-facing task contract |
-| `kanban/todo` | Tasks that can be registered or are active |
-| `kanban/done` | Tasks completed by the workflow |
-| `scripts/task-doctor.mjs` | Task lifecycle and verification |
-| `scripts/app-control.mjs` | Application start, stop, and port management |
-| `scripts/update-harness.mjs` | Git-free release updater for managed Harness files |
-| `harness-manifest.json` | Authoritative list of files and package scripts owned by the Harness |
-| `.opencode/agents` | Definitions of the three agent roles |
-| `.opencode/plugins` | Project-local Workflow Guards |
-| `project.json` | Central project configuration |
-| `AGENTS.md` | Authoritative working rules |
-| `MEMORY.md` | Durable project knowledge |
-| `CUSTOM.md` | Rules are project- or user-maintained and read by Planner |
-| `WORKER.md` | Learned Guard rules for Worker |
-
 ## Setup
 
-Node.js, npm, and an OpenCode installation are required. After copying or cloning the template, run:
+Node.js, npm, and an OpenCode installation are required. Dependencies are not stored in Git, so run the setup command once after cloning or whenever the local dependencies are absent:
 
 ```bash
-npm ci
-npm --prefix code/backend ci
-npm --prefix code/frontend ci
-npm --prefix .opencode ci
-npm run task:doctor:test
+npm run setup
 ```
+
+This installs the locked Root, Backend, Frontend, and OpenCode dependencies. Existing installations do not need to run it again.
 
 Next, configure `project.json` and start the application:
 
@@ -58,6 +52,35 @@ npm run app:status
 ```
 
 By default, the frontend runs at `http://localhost:5173` and the backend runs on port `3001`. Both ports are configured in `project.json`.
+
+## Recommended Usage
+
+1. Set the project name, ports, and optional agent models in `project.json`.
+2. Start a Planner session for a new or unclear requirement.
+3. Resolve any material product decision that cannot be derived from the request or project.
+4. After registration, start an Executor session to process the tasks.
+5. Let Executor delegate Workers and perform the technical completion transition.
+6. Maintain durable project rules through `CUSTOM.md`, Worker learnings through `WORKER.md`, and project knowledge through `MEMORY.md`.
+
+Tasks should remain small and state an unambiguous result. The Harness makes operations safe and reproducible; task design remains responsible for product intent.
+
+## Roles and Workflow
+
+### 1. Planner
+
+Planner analyzes the request and existing project evidence. It asks only about a material decision that cannot be derived, then registers tasks through the minimal `title`, `files`, `done`, and optional `depends_on` tool contract. It may read application code but must not modify it. Registration derives the canonical task file and Doctor metadata atomically, then Planner stops.
+
+### 2. Executor
+
+Executor asks Doctor for runnable tasks and delegates only `READY` tasks. It respects the configured Worker limit and advances only the exact technical recovery path returned by the Harness. After Doctor PASS, Executor invokes the zero-argument, hash-bound completion transition. It does not grade implementation quality or author review findings.
+
+### 3. Worker
+
+A Worker handles exactly one delegated task. It reads its rules and task, remains inside declared scope, and changes files only through a flat Preview followed by zero-argument Apply or Discard. The Harness validates the operation and runs any exact task verification commands mechanically. After `TASK DOCTOR: PASS`, Worker returns `REVIEWABLE` to Executor and stops.
+
+### 4. Technical Completion
+
+The completion transition checks only the active task hash, verified filesystem snapshot, path safety, and Doctor state before moving the task to `kanban/done`. It has no verdict, findings, score, locator semantics, translation semantics, architecture policy, or test-quality judgment. After repeated technical blockers, Worker may return `HELP_REQUESTED`; the persisted receipt selects a retry or Planner-owned task correction.
 
 ## Configuration
 
@@ -174,24 +197,6 @@ Doctor can check whether tests modify a SQLite database without cleaning it up a
 
 The list may remain empty if the project has no persistent test state.
 
-## Roles and Workflow
-
-### 1. Planner
-
-Planner analyzes the request and existing project evidence. It asks only about a material decision that cannot be derived, then registers tasks through the minimal `title`, `files`, `done`, and optional `depends_on` tool contract. It may read application code but must not modify it. Registration derives the canonical task file and Doctor metadata atomically, then Planner stops.
-
-### 2. Executor
-
-Executor asks Doctor for runnable tasks and delegates only `READY` tasks. It respects the configured Worker limit and advances only the exact technical recovery path returned by the Harness. After Doctor PASS, Executor invokes the zero-argument, hash-bound completion transition. It does not grade implementation quality or author review findings.
-
-### 3. Worker
-
-A Worker handles exactly one delegated task. It reads its rules and task, remains inside declared scope, and changes files only through a flat Preview followed by zero-argument Apply or Discard. The Harness validates the operation and runs any exact task verification commands mechanically. After `TASK DOCTOR: PASS`, Worker returns `REVIEWABLE` to Executor and stops.
-
-### 4. Technical Completion
-
-The completion transition checks only the active task hash, verified filesystem snapshot, path safety, and Doctor state before moving the task to `kanban/done`. It has no verdict, findings, score, locator semantics, translation semantics, architecture policy, or test-quality judgment. After repeated technical blockers, Worker may return `HELP_REQUESTED`; the persisted receipt selects a retry or Planner-owned task correction.
-
 ## Writing Tasks
 
 The preferred Planner call contains only:
@@ -234,17 +239,28 @@ Planner, Executor, and Worker run only the commands allowed for their respective
 npm run test:e2e
 ```
 
-## Recommended Usage
-
-1. Set the project name, ports, and optional agent models in `project.json`.
-2. Start a Planner session for a new or unclear requirement.
-3. Resolve any material product decision that cannot be derived from the request or project.
-4. After registration, start an Executor session to process the tasks.
-5. Let Executor delegate Workers and perform the technical completion transition.
-6. Maintain durable project rules through `CUSTOM.md`, Worker learnings through `WORKER.md`, and project knowledge through `MEMORY.md`.
-
-Tasks should remain small and state an unambiguous result. The Harness makes operations safe and reproducible; task design remains responsible for product intent.
-
 ## Local Runtime Data
 
 `.task-doctor`, `.runtime`, Playwright reports, and Kanban files in `kanban/todo`, `kanban/done`, and `kanban/superseded` are local runtime data and are not versioned. The `.gitkeep` files preserve the empty Kanban directories in the repository. To commit task history intentionally, adjust the corresponding rules in `.gitignore`.
+
+## Project Structure
+
+| Path | Purpose |
+| --- | --- |
+| `code/backend` | Backend application and backend tests |
+| `code/frontend` | Frontend application and browser E2E tests |
+| `code/database` | Local persistent data |
+| `kanban/TASK.md` | Minimal model-facing task contract |
+| `kanban/todo` | Tasks that can be registered or are active |
+| `kanban/done` | Tasks completed by the workflow |
+| `scripts/task-doctor.mjs` | Task lifecycle and verification |
+| `scripts/app-control.mjs` | Application start, stop, and port management |
+| `scripts/update-harness.mjs` | Git-free release updater for managed Harness files |
+| `harness-manifest.json` | Authoritative list of files and package scripts owned by the Harness |
+| `.opencode/agents` | Definitions of the three agent roles |
+| `.opencode/plugins` | Project-local Workflow Guards |
+| `project.json` | Central project configuration |
+| `AGENTS.md` | Authoritative working rules |
+| `MEMORY.md` | Durable project knowledge |
+| `CUSTOM.md` | Rules are project- or user-maintained and read by Planner |
+| `WORKER.md` | Learned Guard rules for Worker |
