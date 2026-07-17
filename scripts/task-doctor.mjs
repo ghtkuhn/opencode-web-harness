@@ -360,6 +360,7 @@ function scopePathFormatError(path) {
     if (path.startsWith('/') || path.startsWith('~')) return 'path must be project-relative';
     if (path.includes('\\')) return 'path must use forward slashes';
     if (path.split('/').some((segment) => segment === '.' || segment === '..')) return 'path must not contain dot segments';
+    if (/[*?[\]]/.test(path)) return 'path must be exact and must not contain glob metacharacters';
     return null;
 }
 
@@ -528,6 +529,7 @@ function parseTask(taskPath, requireTodo = true) {
         name: relativePath.split('/').pop(),
         contentHash: hash(content),
         allowedScope,
+        allowedScopeEntries,
         contextPaths,
         commands,
         memoryAction,
@@ -580,14 +582,33 @@ function scopePathExistedAtActiveTaskStart(path, taskPath, taskHash) {
 }
 
 function registeredPeerTaskChange(path, activeTaskPath) {
-    if (path === activeTaskPath || !/^kanban\/todo\/[^/]+\.md$/.test(path)) return false;
-    const absolutePath = resolve(root, path);
-    if (!existsSync(absolutePath)) return false;
+    if (path === activeTaskPath) return false;
+    const match = path.match(/^kanban\/(?:todo|done)\/([^/]+\.md)$/);
+    if (!match) return false;
+    const candidates = [`kanban/todo/${match[1]}`, `kanban/done/${match[1]}`]
+        .filter((candidate) => existsSync(resolve(root, candidate)));
+    if (candidates.length !== 1) return false;
+    const absolutePath = resolve(root, candidates[0]);
     const task = {
-        name: path.split('/').pop(),
+        name: match[1],
         contentHash: fileHash(absolutePath),
     };
     return taskRegistrationValid(task);
+}
+
+function hasTechnicalOperationEvidence(report) {
+    const changedFiles = Array.isArray(report?.changedFiles)
+        ? report.changedFiles.filter((path) => typeof path === 'string' && path.length > 0)
+        : [];
+    const successfulCommands = Array.isArray(report?.commands)
+        ? report.commands.filter((entry) => (
+            entry
+            && Number.isInteger(entry.expectedExit)
+            && Number.isInteger(entry.actualExit)
+            && entry.actualExit === entry.expectedExit
+        ))
+        : [];
+    return changedFiles.length > 0 || successfulCommands.length > 0;
 }
 
 function readJson(path, missingMessage) {
@@ -1193,7 +1214,6 @@ function verify(taskPath) {
     const harnessDrift = executorHarnessDrift(state.snapshot, beforeVerify, task.allowedScope, task.relativePath);
     if (harnessDrift.length > 0) failExecutorHarnessRecovery(state, task, beforeVerify, harnessDrift);
 
-    const changed = taskRelevantChangedPaths(state.snapshot, beforeVerify, task);
     errors.push(...outsideScopeFindings(state.snapshot, beforeVerify, task.allowedScope, task.relativePath, state.whitelistedFiles ?? [], ignoredProjectPaths));
     const currentMemory = memoryState();
     const memoryChanged = state.memory.exists !== currentMemory.exists || state.memory.hash !== currentMemory.hash;
@@ -1257,8 +1277,17 @@ function verify(taskPath) {
     const verifiedMemoryLimit = task.memoryAction !== 'none' ? memoryLimitStatus() : null;
     if (verifiedMemoryLimit) fail([memoryRecoveryMessage(verifiedMemoryLimit)]);
     const postErrors = outsideScopeFindings(beforeVerify, verifiedSnapshot, task.allowedScope, task.relativePath, state.whitelistedFiles ?? [], ignoredProjectPaths);
+    const missingNewPaths = task.allowedScopeEntries
+        .filter((entry) => entry.isNew && !existsSync(resolve(root, entry.path)))
+        .map((entry) => `NEW_SCOPE_PATH_MISSING: ${entry.path}; create the declared path before PASS`);
+    postErrors.push(...missingNewPaths);
     if (gitMode && state.indexHash !== indexHash()) postErrors.push('GIT_INDEX_CHANGED: verification staged files');
     if (postErrors.length > 0) fail(postErrors);
+
+    const changedFiles = taskRelevantChangedPaths(state.snapshot, verifiedSnapshot, task);
+    if (!hasTechnicalOperationEvidence({ changedFiles, commands: commandResults })) {
+        fail(['NO_TECHNICAL_OPERATION: PASS requires at least one in-scope changed path or one successful Verify command']);
+    }
 
     const projectMemoryLimit = task.memoryAction === 'none' ? memoryLimitStatus() : null;
     const executorRecovery = projectMemoryLimit
@@ -1276,7 +1305,7 @@ function verify(taskPath) {
         },
         taskPath: task.relativePath,
         head: state.head,
-        changedFiles: taskRelevantChangedPaths(state.snapshot, verifiedSnapshot, task),
+        changedFiles,
         executorRecovery,
         whitelistedFiles: state.whitelistedFiles ?? [],
         testFiles: state.testFiles ?? [],
@@ -1330,6 +1359,12 @@ function complete(taskPath) {
         if (relevantChangedPaths(state.verifiedSnapshot, currentSnapshot).length > 0) errors.push('FILES_CHANGED_AFTER_PASS: rerun the task from start');
     } else if (state.verifiedSnapshotHash !== snapshotHash(currentSnapshot)) {
         errors.push('FILES_CHANGED_AFTER_PASS: rerun the task from start');
+    }
+    const report = typeof state.reportPath === 'string'
+        ? readJson(resolve(root, state.reportPath), 'PASS_REPORT_MISSING: rerun the task from start')
+        : null;
+    if (!hasTechnicalOperationEvidence(report)) {
+        errors.push('NO_TECHNICAL_OPERATION: completion requires an in-scope changed path or a successful Verify command');
     }
     if (errors.length > 0) fail(errors);
 
@@ -1402,6 +1437,10 @@ function selfTest() {
         [scopePathFormatError('src/a.ts') === null, 'exact scope path acceptance'],
         [scopePathFormatError('src/public exports/index.ts') === null, 'scope path with spaces acceptance'],
         [Boolean(scopePathFormatError('../outside.ts')), 'parent scope path rejection'],
+        [Boolean(scopePathFormatError('src/**/*.tsx')), 'wildcard scope path rejection'],
+        [hasTechnicalOperationEvidence({ changedFiles: ['src/a.ts'], commands: [] }), 'changed path technical evidence'],
+        [hasTechnicalOperationEvidence({ changedFiles: [], commands: [{ expectedExit: 0, actualExit: 0 }] }), 'successful Verify technical evidence'],
+        [!hasTechnicalOperationEvidence({ changedFiles: [], commands: [] }), 'empty technical evidence rejection'],
         [normalizeTaskDependency('04-prerequisite.md') === '04-prerequisite.md', 'dependency filename normalization'],
         [normalizeTaskDependency('kanban/todo/04-prerequisite.md') === '04-prerequisite.md', 'todo dependency path normalization'],
         [normalizeTaskDependency('kanban/done/04-prerequisite.md') === '04-prerequisite.md', 'done dependency path normalization'],

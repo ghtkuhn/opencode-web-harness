@@ -28,7 +28,13 @@ import {
   workerReturnIssue,
 } from "../lib/review-contract.ts"
 import { CUSTOM_MODEL_TOOL_NAMES, formatModelInputError, repairModelInput } from "../lib/model-input.ts"
-import { scopePathFormatError, shellCommandMutates } from "../lib/workflow-guard-rules.ts"
+import {
+  canonicalUniqueNpmScript,
+  hasTechnicalOperationEvidence,
+  scopePathFormatError,
+  shellCommandMutates,
+  stripHarmlessOutputSuffix,
+} from "../lib/workflow-guard-rules.ts"
 import {
   canonicalWorkerDoctorCommand,
   isDoctorCommand,
@@ -293,6 +299,13 @@ function canonicalPlannerPackageScriptsCommand(root: string, command: string) {
   if (!prefix) return null
   const manifest = prefix === "." ? "package.json" : `${prefix}/package.json`
   return existsSync(resolve(root, manifest)) ? `jq '.scripts' ${manifest}` : null
+}
+
+function projectNpmScriptNames(root: string) {
+  const scripts = readJson(resolve(root, "package.json"))?.scripts
+  return scripts && typeof scripts === "object" && !Array.isArray(scripts)
+    ? Object.keys(scripts)
+    : []
 }
 
 function plannerReadOnlyCommand(command: string) {
@@ -1571,6 +1584,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
   const workerHelpTerminalSessions = new Set<string>()
   const workerHarnessRecoveryTerminals = new Map<string, { taskPath: string; taskHash: string }>()
   const terminalExecutorReasons = new Map<string, string>()
+  const terminalRoleLoopReasons = new Map<string, string>()
   const activePlannerRecoveries = new Map<string, ActivePlannerRecovery>()
   const guardLearningResumePending = new Map<string, string>()
   const lastDoctorFailurePath = resolve(root, ".task-doctor/last-doctor-failure.json")
@@ -8413,6 +8427,14 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
             )
           }
 
+          const report = typeof state.reportPath === "string" ? readJson(resolve(root, state.reportPath)) : null
+          if (!hasTechnicalOperationEvidence(report)) {
+            throw projectGuardError(context.sessionID,
+              "Doctor completion evidence contains neither an in-scope changed path nor a successful Verify command.",
+              "Do not complete this no-op task. Return it to Planner so the task requires a technically observable operation.",
+            )
+          }
+
           const changedFiles = [...new Set(changedFilesForReview(root, state).map((path) => normalize(root, path)))]
           if (changedFiles.some((path) => path === null)) {
             throw projectGuardError(context.sessionID,
@@ -8867,6 +8889,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
     "chat.message": async ({ sessionID, agent, model }, output) => {
       if (enabled) scheduleWorkerSessionMaintenance(sessionID)
       rememberSessionIdentity(sessionID, { agent }, model)
+      terminalRoleLoopReasons.delete(sessionID)
       await initializeReviewedWorkerRetry(sessionID)
       await initializeStagedHelpDelegation(sessionID)
       if (agent && modeSettings.executorAgents.has(agent.toLowerCase())) {
@@ -8989,12 +9012,16 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       let automaticRequiredTaskRead: ReturnType<typeof automaticWorkerTaskReadCandidate> = null
       const rawCommand = String(output.args?.command ?? "")
       if (plannerMode && input.tool === "bash") {
-        const packageScripts = canonicalPlannerPackageScriptsCommand(root, rawCommand)
-        const canonical = canonicalPlannerDoctorCommand(rawCommand)
+        const strippedCommand = stripHarmlessOutputSuffix(rawCommand)
+        const repairedScript = canonicalUniqueNpmScript(strippedCommand, projectNpmScriptNames(root))
+        const repairableCommand = repairedScript ?? strippedCommand
+        const packageScripts = canonicalPlannerPackageScriptsCommand(root, repairableCommand)
+        const canonical = canonicalPlannerDoctorCommand(repairableCommand)
         if (packageScripts) {
           output.args.command = packageScripts
           output.args.workdir = root
         } else if (canonical) output.args.command = canonical
+        else if (plannerAppCommand.test(repairableCommand)) output.args.command = repairableCommand
       }
       if (workerMode && input.tool === "bash") {
         const canonical = canonicalWorkerDoctorCommand(rawCommand)
@@ -9018,8 +9045,13 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
           }
         }
       }
-      if (executorMode && input.tool === "bash" && /^npm\s+run\s+task:doctor:schedule\s+2>&1\s*$/.test(rawCommand)) {
-        output.args.command = "npm run task:doctor:schedule"
+      if (executorMode && input.tool === "bash") {
+        const strippedCommand = stripHarmlessOutputSuffix(rawCommand)
+        const repairedScript = canonicalUniqueNpmScript(strippedCommand, projectNpmScriptNames(root))
+        const repairableCommand = repairedScript ?? strippedCommand
+        if (/^npm\s+run\s+task:doctor:schedule\s*$/.test(repairableCommand)) {
+          output.args.command = "npm run task:doctor:schedule"
+        }
       }
       if (input.tool === "bash" && isDoctorCommand(String(output.args?.command ?? ""))) {
         output.args.workdir = root
@@ -9062,6 +9094,10 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
         }
       }
       const pendingHarnessRecovery = features.executorBaselineRecovery ? taskHarnessRecoveryStatus(root) : null
+      const terminalRoleLoopReason = terminalRoleLoopReasons.get(input.sessionID)
+      if (terminalRoleLoopReason && input.tool !== "record_guard_learning") {
+        throw new Error(`${terminalRoleLoopReason}\nNo further role tool calls are allowed until the user sends a new instruction.`)
+      }
       const terminalExecutorReason = terminalExecutorReasons.get(input.sessionID)
       if (executorMode && terminalExecutorReason && input.tool !== "record_guard_learning"
         && !(pendingHarnessRecovery && input.tool === "recover_harness_baseline")) {
@@ -9338,7 +9374,14 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
             sessionFeedback.set(input.sessionID, `MODEL LOOP STOP\nThe same tool call was attempted three times. Latest problem: ${fingerprint.problem}\nCall request_executor_help and end this Worker run.`)
             throw new Error(`MODEL LOOP STOP\nThe same tool call was attempted three times for ${target}. Latest problem: ${fingerprint.problem}\nCall request_executor_help now and then stop.`)
           }
-          throw guardError("The same tool call was attempted three times without a different action.", "Read the latest failure, change the approach or inputs, and do not repeat the identical call.")
+          const reason = [
+            "MODEL LOOP STOP",
+            "The same tool call was attempted three times without a different action.",
+            "Stop this role run. A new user instruction is required before another tool call.",
+          ].join("\n")
+          terminalRoleLoopReasons.set(input.sessionID, reason)
+          sessionFeedback.set(input.sessionID, reason)
+          throw new Error(reason)
         }
       }
 
