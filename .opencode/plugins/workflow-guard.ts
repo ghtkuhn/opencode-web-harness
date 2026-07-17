@@ -6949,12 +6949,14 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
               "Preview exactly one project file. Split the operations into sequential previews and apply each file before preparing the next.",
             )
           }
-          const unreadExistingPath = operationPaths.find((path) => {
+          const unreadExistingPath = operations.find((operation) => {
+            if (operation.kind === "delete") return false
+            const path = normalize(root, operation.path) ?? operation.path
             const absolutePath = resolve(root, path)
             return existsSync(absolutePath)
               && statSync(absolutePath).isFile()
               && !workerFileWasFullyRead(context.sessionID, path, state)
-          })
+          })?.path
           if (unreadExistingPath) {
             throw projectGuardError(context.sessionID,
               `Worker preview target ${unreadExistingPath} has not been fully read at its current hash in this task context.`,
@@ -7152,7 +7154,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
                 : doctorObservation?.terminal
                 ? "This Doctor result is terminal for Worker. End now with the canonical BLOCKED or HELP_REQUESTED handoff; do not call another tool."
                 : doctorRun?.status === "pass"
-                  ? "Doctor PASS is authoritative. Return REVIEWABLE now; do not inspect or change another file."
+                  ? `NEXT: return exactly:\nREVIEWABLE\nTask: ${receipt.taskPath}`
                   : doctorObservation?.findingTarget
                     ? `Mechanical Doctor verify named ${doctorObservation.findingTarget}. Read that exact file next and correct all applicable requirements there together.`
                     : doctorRun
@@ -7293,7 +7295,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
                           : "Next: Preview/Apply.",
                       ].join("\n")
                   : run.status === "pass"
-                    ? "Doctor PASS is authoritative. Return REVIEWABLE now; do not inspect or change another file."
+                    ? `NEXT: return exactly:\nREVIEWABLE\nTask: ${state.taskPath}`
                     : observation.findingTarget
                       ? `Read ${observation.findingTarget} next and correct all applicable requirements there together.`
                       : "Use the exact Doctor finding for one in-scope correction; do not rerun unchanged verification.",
