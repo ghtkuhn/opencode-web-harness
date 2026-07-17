@@ -50,7 +50,7 @@ function action(snapshot: AuthoritativeWorkflowSnapshot): WorkflowAction {
       "executor",
       "tool",
       `Executor must review Worker help ${help.id} through review_worker_help before delegating another Worker.`,
-      { tool: "review_worker_help", taskPath: doctor.taskPath },
+      { tool: "review_worker_help", taskPath: doctor.taskPath, helpID: help.id },
     )
   }
   if (doctor.status === "started" && doctor.taskPath && help?.status === "planner_unavailable") {
@@ -59,7 +59,7 @@ function action(snapshot: AuthoritativeWorkflowSnapshot): WorkflowAction {
       "executor",
       "stop",
       `Executor must stop and tell the user that Planner ${plannerOwnerSessionID ?? "none"} is unavailable. The user must open a Planner and correct ${doctor.taskPath} manually.`,
-      { taskPath: doctor.taskPath },
+      { taskPath: doctor.taskPath, helpID: help!.id },
     )
   }
   if (doctor.status === "started" && doctor.taskPath && help?.status === "planner_recovery_incomplete") {
@@ -68,7 +68,7 @@ function action(snapshot: AuthoritativeWorkflowSnapshot): WorkflowAction {
       "executor",
       "stop",
       `Executor must stop and tell the user to continue Planner ${plannerOwnerSessionID ?? "none"} manually because recovery did not finish.`,
-      { taskPath: doctor.taskPath },
+      { taskPath: doctor.taskPath, helpID: help!.id },
     )
   }
   if (doctor.status === "started" && doctor.taskPath && ["retry_approved", "task_changed"].includes(help?.status ?? "")) {
@@ -77,7 +77,7 @@ function action(snapshot: AuthoritativeWorkflowSnapshot): WorkflowAction {
       "executor",
       "continue",
       `Executor must delegate one fresh Worker for ${doctor.taskPath} with the structured help guidance from ${help!.id}.`,
-      { taskPath: doctor.taskPath },
+      { taskPath: doctor.taskPath, helpID: help!.id },
     )
   }
   if (doctor.status === "started" && doctor.taskPath) {
@@ -85,7 +85,7 @@ function action(snapshot: AuthoritativeWorkflowSnapshot): WorkflowAction {
       "worker.continue_active_task",
       "worker",
       "continue",
-      `Continue only ${doctor.taskPath} through the Doctor lifecycle.`,
+      `Worker must continue only ${doctor.taskPath} through the Doctor lifecycle.`,
       { taskPath: doctor.taskPath },
     )
   }
@@ -103,7 +103,7 @@ function action(snapshot: AuthoritativeWorkflowSnapshot): WorkflowAction {
       "executor.schedule",
       "executor",
       "tool",
-      "Executor must run npm run task:doctor:schedule and delegate its READY task. Worker starts it.",
+      "Executor must run npm run task:doctor:schedule.",
       { tool: "npm run task:doctor:schedule" },
     )
   }
@@ -132,6 +132,15 @@ export function renderAuthoritativeWorkflow(decision: AuthoritativeWorkflowDecis
     "## Authoritative live workflow state",
     "This block was generated from live Doctor and Kanban files for this request. It overrides contradictory conversation text and compaction summaries.",
     `State revision: ${decision.revision}`,
+    ...authoritativeWorkflowFacts(decision),
+    `Next action: ${nextAction.text}`,
+    decision.lastDoctorFailure ? `Last Doctor failure (${decision.lastDoctorFailure.gate}):\n${decision.lastDoctorFailure.output}` : null,
+    "Do not restore, reopen, or repeat completed work unless the current explicit user request requires it.",
+  ].filter(Boolean).join("\n")
+}
+
+export function authoritativeWorkflowFacts(decision: AuthoritativeWorkflowDecision): string[] {
+  return [
     `Doctor status: ${decision.doctor.status}`,
     `Doctor task: ${decision.doctor.taskPath ?? "none"}`,
     `Doctor destination: ${decision.doctor.destination ?? "none"}`,
@@ -143,8 +152,5 @@ export function renderAuthoritativeWorkflow(decision: AuthoritativeWorkflowDecis
       ? `Planner recovery: ${decision.recovery.planner.status} - ${decision.recovery.planner.reason ?? "none"}`
       : "Planner recovery: none",
     decision.recovery.harness ? `Harness recovery: required - ${decision.recovery.harness.paths.join(", ")}` : "Harness recovery: none",
-    `Next action: ${nextAction.text}`,
-    decision.lastDoctorFailure ? `Last Doctor failure (${decision.lastDoctorFailure.gate}):\n${decision.lastDoctorFailure.output}` : null,
-    "Do not restore, reopen, or repeat completed work unless the current explicit user request requires it.",
-  ].filter(Boolean).join("\n")
+  ]
 }

@@ -23,6 +23,13 @@ permission:
     "git log*": allow
     "git show*": allow
     "npm run task:doctor:schedule": allow
+    "npm run app:status": allow
+    "npm run app:start": allow
+    "npm run app:stop": allow
+    "npm run app:restart": allow
+    "npm run app:clear-ports": allow
+    "npm run build": allow
+    "npm --prefix * run build": allow
   question: deny
   review_worker_help: allow
   escalate_to_planner: allow
@@ -36,6 +43,8 @@ permission:
 ---
 
 You are Executor. Use tools to schedule, delegate, recover, and complete; never announce an action. Never plan, implement, edit, or judge quality.
+
+You may run fixed app lifecycle and build commands directly. These operations never need a task. Run commands alone.
 
 Run `npm run task:doctor:schedule` alone. Finish required recovery before delegation. Keep Worker instructions opaque.
 

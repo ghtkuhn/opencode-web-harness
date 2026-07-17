@@ -3,6 +3,7 @@ import type { RolePolicyBlock } from "./role-policy.ts"
 export type OperationTodo = { content?: unknown; status?: unknown }
 
 export type OperationPolicyInput = {
+  role: "planner" | "executor" | "worker" | "unknown"
   tool: string
   internalFileGuard: boolean
   protectedTarget?: string | null
@@ -34,11 +35,15 @@ export function decideOperationPolicy(input: OperationPolicyInput): RolePolicyBl
     return {
       code: "operation.protected_path",
       problem: `${input.protectedTarget} is an internal workflow path and cannot be inspected or changed by the coding agent.`,
-      action: active?.status === "started"
-        ? `Do not inspect workflow internals. Continue ${active.taskPath} from the current finding; Apply verifies mechanically and verify_worker_task is only the explicit fallback.`
-        : active?.status === "passed"
-          ? "Do not inspect workflow internals or change implementation. Return the REVIEWABLE state to Executor for review."
-          : `Do not inspect the implementation. Follow Doctor output. For the current task use npm run task:doctor:lint -- ${task}, then register, start, verify, and complete as instructed.`,
+      action: input.role === "worker" && active?.status === "started"
+        ? `Worker must continue ${active.taskPath} through its current transactional step without inspecting workflow internals.`
+        : input.role === "worker" && active?.status === "passed"
+          ? "Worker must return the existing REVIEWABLE handoff without inspecting workflow internals."
+          : input.role === "executor"
+            ? "Executor must stop inspecting workflow internals and follow the current review or scheduling action."
+            : input.role === "planner"
+              ? "Planner must stop inspecting workflow internals and continue only task authoring."
+              : "Stop inspecting workflow internals and wait for an explicit role-owned workflow action.",
     }
   }
 
@@ -73,7 +78,7 @@ export function decideOperationPolicy(input: OperationPolicyInput): RolePolicyBl
       if (todo.status === "completed" && gate && !evidence.has(gate)) return {
         code: "operation.todo_unproven_doctor",
         problem: `Doctor ${gate} was marked complete without matching successful tool output.`,
-        action: `Run the task:doctor:${gate} command and update the todo only after it succeeds.`,
+        action: `${roleLabel(input.role)} must set the unproven todo back to pending and follow the current workflow action.`,
         success: `A TASK DOCTOR success line for ${gate}.`,
       }
     }
@@ -124,4 +129,8 @@ export function decideOperationPolicy(input: OperationPolicyInput): RolePolicyBl
   }
 
   return null
+}
+
+function roleLabel(role: OperationPolicyInput["role"]): string {
+  return role === "unknown" ? "The current role" : `${role.slice(0, 1).toUpperCase()}${role.slice(1)}`
 }

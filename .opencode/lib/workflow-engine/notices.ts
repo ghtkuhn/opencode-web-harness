@@ -11,7 +11,7 @@ export function workflowAction(
   role: WorkflowRole,
   kind: WorkflowAction["kind"],
   text: string,
-  options: Pick<WorkflowAction, "tool" | "taskPath"> = {},
+  options: Pick<WorkflowAction, "tool" | "taskPath" | "helpID"> = {},
 ): WorkflowAction {
   const action = { code, role, kind, text: text.trim(), ...options }
   const errors = validateWorkflowAction(action)

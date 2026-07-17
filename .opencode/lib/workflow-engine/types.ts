@@ -2,6 +2,8 @@ export type WorkflowRole = "planner" | "executor" | "worker" | "unknown"
 
 export type WorkflowActionKind = "tool" | "continue" | "return" | "stop" | "wait"
 
+export type DirectivePriority = "recovery" | "terminal" | "help" | "review" | "active" | "schedule" | "idle"
+
 export type WorkflowAction = {
   code: string
   kind: WorkflowActionKind
@@ -9,6 +11,38 @@ export type WorkflowAction = {
   text: string
   tool?: string
   taskPath?: string
+  helpID?: string
+}
+
+export type WorkflowDirective = WorkflowAction & {
+  priority: DirectivePriority
+  precedence?: number
+  terminal: boolean
+  requires?: string[]
+  forbids?: string[]
+  after?: WorkflowAction
+}
+
+export type PromptFrame = {
+  role: WorkflowRole
+  revision?: string | null
+  taskPath?: string | null
+  helpID?: string | null
+  facts: string[]
+  evidence?: string | null
+  directives: WorkflowDirective[]
+}
+
+export type WorkflowFeedback = {
+  evidence: string
+  directive: WorkflowDirective
+}
+
+export type ComposedWorkflowPrompt = {
+  primary: WorkflowDirective
+  after?: WorkflowAction
+  diagnostics: string[]
+  text: string
 }
 
 export type GuardNotice = {

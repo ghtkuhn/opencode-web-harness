@@ -39,7 +39,7 @@ export function decideSessionAction(input: SessionActionInput): WorkflowAction |
       "executor",
       "tool",
       `Executor must call review_worker_help for ${input.pendingHelpReviewID} again now because newer full-file evidence is loaded. Do not delegate Worker.`,
-      { tool: "review_worker_help" },
+      { tool: "review_worker_help", helpID: input.pendingHelpReviewID },
     )
   }
   if (input.requestedHelpReReviewID) {
@@ -48,7 +48,7 @@ export function decideSessionAction(input: SessionActionInput): WorkflowAction |
       "executor",
       "tool",
       `Executor must re-review Worker help ${input.requestedHelpReReviewID} through review_worker_help now. Do not delegate Worker.`,
-      { tool: "review_worker_help" },
+      { tool: "review_worker_help", helpID: input.requestedHelpReReviewID },
     )
   }
   if (input.plannerRecoveryRequest) {
@@ -68,7 +68,7 @@ export function decideSessionAction(input: SessionActionInput): WorkflowAction |
       "planner.schedule_once",
       "planner",
       "tool",
-      "Planner must run npm run task:doctor:schedule once, then stop.",
+      "Planner must run npm run task:doctor:schedule once.",
       { tool: "npm run task:doctor:schedule" },
     )
   }
@@ -108,7 +108,7 @@ function plannerRecoveryAction(input: SessionActionInput["activePlannerRecovery"
       "planner.finish_prestart_recovery",
       "planner",
       "continue",
-      `Planner must correct ${input.taskPath}, then run its exact Doctor lint and register commands now. Do not implement or delegate.`,
+      `Planner must correct the task definition for ${input.taskPath} without implementing or delegating.`,
       { taskPath: input.taskPath },
     )
   }

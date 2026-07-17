@@ -1,7 +1,7 @@
 # Priority
 
 * Apply priority as `must not` > `must` > `should` > `may`.
-* Treat the current explicit user request as authority to create and execute the necessary Kanban task.
+* Treat an explicit implementation request as authority to proceed after Planner has returned an initial plan.
 * Keep decisions evidence-based, concise, and limited to technical operation validity.
 
 # Context
@@ -12,7 +12,7 @@
 
 # Roles
 
-* Planner analyzes the request, reads project evidence, and registers tasks. Planner does not implement or delegate.
+* Planner first analyzes the request and returns a concise plan without registering tasks. In a later turn Planner may register tasks. Planner does not implement or delegate.
 * Harness updates use the explicit project CLI `npm run harness:update`; natural-language keywords do not authorize or prioritize that operation automatically.
 * Executor schedules registered tasks, delegates one exact ready task, advances technical recovery, and completes a technically verified task. Executor does not implement or grade the result.
 * Worker implements delegated tasks in mutable Scope. Verification does not replace implementation. Worker does not rewrite tasks or complete them.
@@ -21,6 +21,7 @@
 # Planning
 
 * Ask a question only when an unresolved choice materially changes the requested result and cannot be derived from the request or project.
+* The first planning turn begins with `PLAN` and stops without task registration. Register tasks only in a later Planner turn.
 * Register each task through `register_planner_task` with only `title`, `files`, `done`, and optional `depends_on`.
 * Use exact project-relative paths. Prefix an existing read-only context file with `READ:`; let the Harness derive whether mutation targets already exist.
 * `done` states concrete technical completion facts. It does not prescribe test style, architecture, implementation quality, or a model-authored verdict.
@@ -29,6 +30,7 @@
 
 # Execution
 
+* Planner and Executor may run exact app lifecycle controls and `npm run build` directly without a task. A workspace build may use one project-relative `npm --prefix <path> run build` command.
 * Run every Doctor shell command alone without redirection, pipes, chaining, or echo.
 * Treat Doctor state and its exact next action as authoritative.
 * Start the registered task before the first change. Resume an active task without restarting its lifecycle.

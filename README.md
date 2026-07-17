@@ -20,7 +20,7 @@ Set the application `name`, ports, and optional agent models in `project.json`, 
 npm run app:start
 ```
 
-Open the project in OpenCode, give the requirement to Planner, and continue with Executor after Planner has registered the tasks. See [Setup](#setup), [Configuration](#configuration), and [Recommended Usage](#recommended-usage) for the available options.
+Open the project in OpenCode and give the requirement to Planner. Planner first returns a concise plan without creating tasks. In a later turn, ask it to register the plan when tasks are needed, then continue with Executor. See [Setup](#setup), [Configuration](#configuration), and [Recommended Usage](#recommended-usage) for the available options.
 
 ## What It Does
 
@@ -56,11 +56,12 @@ By default, the frontend runs at `http://localhost:5173` and the backend runs on
 ## Recommended Usage
 
 1. Set the project name, ports, and optional agent models in `project.json`.
-2. Start a Planner session for a new or unclear requirement.
+2. Start a Planner session for a new or unclear requirement and review its initial plan.
 3. Resolve any material product decision that cannot be derived from the request or project.
-4. After registration, start an Executor session to process the tasks.
-5. Let Executor delegate Workers and perform the technical completion transition.
-6. Maintain durable project rules through `CUSTOM.md`, Worker learnings through `WORKER.md`, and project knowledge through `MEMORY.md`.
+4. In a later turn, ask Planner to register only the tasks the plan needs.
+5. After registration, start an Executor session to process the tasks.
+6. Let Executor delegate Workers and perform the technical completion transition.
+7. Maintain durable project rules through `CUSTOM.md`, Worker learnings through `WORKER.md`, and project knowledge through `MEMORY.md`.
 
 Tasks should remain small and state an unambiguous result. The Harness makes operations safe and reproducible; task design remains responsible for product intent.
 
@@ -68,11 +69,13 @@ Tasks should remain small and state an unambiguous result. The Harness makes ope
 
 ### 1. Planner
 
-Planner analyzes the request and existing project evidence. It asks only about a material decision that cannot be derived, then registers tasks through the minimal `title`, `files`, `done`, and optional `depends_on` tool contract. It may read application code but must not modify it. Registration derives the canonical task file and Doctor metadata atomically, then Planner stops.
+Planner analyzes the request and existing project evidence, then ends its first turn with a concise plan and no task registration. In a later turn it may register the necessary tasks through the minimal `title`, `files`, `done`, and optional `depends_on` tool contract. It may read application code but must not modify it. Registration derives the canonical task file and Doctor metadata atomically, then Planner stops.
 
 ### 2. Executor
 
 Executor asks Doctor for runnable tasks and delegates only `READY` tasks. It respects the configured Worker limit and advances only the exact technical recovery path returned by the Harness. After Doctor PASS, Executor invokes the zero-argument, hash-bound completion transition. It does not grade implementation quality or author review findings.
+
+Planner and Executor may run an explicitly requested app lifecycle command or build directly without creating a task. Exact commands run once; a successful sequence advances in order, while a failed operation is reported without an unchanged retry.
 
 ### 3. Worker
 

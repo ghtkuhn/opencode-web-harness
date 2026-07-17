@@ -92,7 +92,15 @@ export function decideLifecyclePolicy(input: LifecyclePolicyInput): RolePolicyBl
     return {
       code: "lifecycle.unsupported_doctor",
       problem: "The Doctor command is unsupported or missing its exact task path.",
-      action: `Use only schedule, next, lint, register, start, verify, complete, whitelist, or test-file. Run npm run task:doctor:schedule and use an exact READY path. Current path: ${task}.`,
+      action: input.role === "executor"
+        ? "Executor must run only npm run task:doctor:schedule; Worker owns every other Doctor lifecycle command."
+        : input.role === "planner"
+          ? "Planner must stop this malformed command and use the Planner task tools or exact Doctor next/schedule."
+          : input.role === "worker" && active?.status === "started"
+            ? `Worker must continue ${active.taskPath} through its current transactional step; do not schedule or repeat the malformed command.`
+            : input.role === "worker"
+              ? `Worker must return BLOCKED for ${task}; no exact active Worker lifecycle instruction is available.`
+              : "Stop this malformed Doctor command and wait for an explicit role-owned workflow action.",
     }
   }
 

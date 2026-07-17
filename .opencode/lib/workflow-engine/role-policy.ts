@@ -13,13 +13,14 @@ export type RolePolicyInput = {
   invocation?: { gate: string; taskPath: string } | null
   plannerDoctor: boolean
   plannerInspection: boolean
-  plannerOperation: boolean
+  projectOperation: boolean
   plannerWrite: boolean
   plannerExecutionQuestion: boolean
   planningEnforcer: boolean
   planningTaskPath?: string
   activeTask?: { status: string; taskPath: string } | null
   taskChangePermission: boolean
+  plannerRecovery?: { lifecycle: "active" | "prestart"; taskPath: string } | null
 }
 
 export function decideRoleToolPolicy(input: RolePolicyInput): RolePolicyBlock | null {
@@ -46,6 +47,7 @@ function plannerPolicy(input: RolePolicyInput): RolePolicyBlock | null {
     }
   }
   if (input.invocation && ["lint", "register"].includes(input.invocation.gate)) {
+    if (input.plannerRecovery?.lifecycle === "prestart" && input.invocation.taskPath === input.plannerRecovery.taskPath) return null
     return {
       code: "planner.direct_registration",
       problem: `Planner attempted Doctor ${input.invocation.gate} directly for ${input.invocation.taskPath}.`,
@@ -61,6 +63,7 @@ function plannerPolicy(input: RolePolicyInput): RolePolicyBlock | null {
     }
   }
   if (input.writes) {
+    if (input.plannerRecovery?.lifecycle === "prestart" && input.planningTaskPath === input.plannerRecovery.taskPath) return null
     if (input.activeTask?.status === "started" && input.planningTaskPath === input.activeTask.taskPath) {
       return {
         code: "planner.active_task_write",
@@ -83,11 +86,11 @@ function plannerPolicy(input: RolePolicyInput): RolePolicyBlock | null {
         action: "Stay in Planner mode and write only approved Kanban tasks or durable memory. Switch to Worker before implementation.",
       }
     }
-  } else if (input.tool === "bash" && !input.plannerDoctor && !input.plannerInspection && !input.plannerOperation) {
+  } else if (input.tool === "bash" && !input.plannerDoctor && !input.plannerInspection && !input.projectOperation) {
     return {
       code: "planner.shell_allowlist",
       problem: "Planner attempted a shell command outside the read-only and fixed app-operation allowlist.",
-      action: "Use one read-only command without pipes, redirects, chaining, or substitution. For runtime control use exactly npm run app:status, app:start, app:stop, or app:restart. Switch to Worker before implementation.",
+      action: "Use one read-only command or one allowed project operation without pipes, redirects, chaining, or substitution. Allowed project operations are app lifecycle controls and build. Switch to Worker before implementation.",
     }
   }
   return null
@@ -102,17 +105,18 @@ function executorPolicy(input: RolePolicyInput): RolePolicyBlock | null {
     }
   }
   if (input.invocation) {
+    if (input.invocation.gate === "schedule") return null
     return {
       code: "executor.doctor_lifecycle",
       problem: `Executor cannot run Doctor ${input.invocation.gate}.`,
-      action: "Delegate the exact registered task to Worker. Only Worker may run the Doctor lifecycle.",
+      action: "Executor must delegate the exact registered task to Worker. Worker owns every Doctor lifecycle command except schedule.",
     }
   }
-  if (input.tool === "bash" && !input.plannerDoctor && !input.plannerInspection) {
+  if (input.tool === "bash" && !input.plannerDoctor && !input.plannerInspection && !input.projectOperation) {
     return {
       code: "executor.shell_allowlist",
-      problem: "Executor attempted a shell command outside the read-only allowlist.",
-      action: "Use one read-only command or task:doctor:schedule. Delegate every mutation and Doctor lifecycle command to Worker.",
+      problem: "Executor attempted a shell command outside the read-only and project-operation allowlist.",
+      action: "Executor must use one read-only command, one allowed app lifecycle or build operation, or task:doctor:schedule. Worker owns every other lifecycle command and mutation.",
     }
   }
   return null
