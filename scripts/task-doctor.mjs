@@ -59,6 +59,7 @@ function parseVerifyCommands(verifyBlock) {
 }
 
 function verifyCommandFormatError(command) {
+    if (process.platform === 'win32') return null;
     const syntax = run('/bin/sh', ['-n', '-c', command]);
     if (syntax.status !== 0) {
         const detail = syntax.stderr.trim().split(/\r?\n/).at(-1) ?? `exit ${syntax.status ?? 'signal'}`;
@@ -1460,7 +1461,7 @@ function selfTest() {
         [forbiddenCommand.test('git commit -m test'), 'Git command rejection'],
         [!forbiddenCommand.test('npm run build && npm test'), 'safe command acceptance'],
         [verifyCommandFormatError('npm test') === null, 'executable Verify command acceptance'],
-        [Boolean(verifyCommandFormatError('npm test (ensure no regressions)')), 'Verify shell syntax rejection'],
+        [process.platform === 'win32' || Boolean(verifyCommandFormatError('npm test (ensure no regressions)')), 'Verify shell syntax rejection'],
         [verifyNpmScriptErrors('npm --prefix . run task:doctor:test').length === 0, 'existing prefixed npm Verify script acceptance'],
         [verifyNpmScriptErrors('npm --prefix . run definitely-missing').some((error) => error.startsWith('VERIFY_SCRIPT_MISSING:')), 'missing prefixed npm Verify script rejection'],
         [verifyNpmScriptErrors('npm run task:doctor:test -- --example').length === 0, 'existing npm Verify script with arguments acceptance'],

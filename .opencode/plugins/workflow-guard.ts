@@ -8683,7 +8683,10 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
             metadata: { task: state.taskPath, affectedPaths: normalizedPaths },
           })
 
-          const result = spawnSync("/bin/zsh", ["-lc", args.command], {
+          const shell = process.platform === "win32"
+            ? { command: process.env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", args.command] }
+            : { command: "/bin/zsh", args: ["-lc", args.command] }
+          const result = spawnSync(shell.command, shell.args, {
             cwd: root,
             encoding: "utf8",
             maxBuffer: 10 * 1024 * 1024,
@@ -8883,7 +8886,10 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
               },
             })
 
-            const result = spawnSync("npm", commandArgs, {
+            const npm = process.platform === "win32"
+              ? { command: process.env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", "npm.cmd", ...commandArgs] }
+              : { command: "npm", args: commandArgs }
+            const result = spawnSync(npm.command, npm.args, {
               cwd: root,
               encoding: "utf8",
               maxBuffer: 10 * 1024 * 1024,

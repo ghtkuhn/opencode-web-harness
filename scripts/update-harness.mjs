@@ -219,12 +219,11 @@ function mergeRuntimeGitignore(root, writes) {
   writes.set(relativePath, Buffer.from(`${prefix}# OpenCode Harness runtime\n${missing.join("\n")}\n`))
 }
 
-function dependencyInstallRequest(root) {
-  return {
-    command: process.platform === "win32" ? "npm.cmd" : "npm",
-    args: ["ci", "--ignore-scripts"],
-    cwd: resolve(root, ".opencode"),
-  }
+export function dependencyInstallRequest(root, platform = process.platform, env = process.env) {
+  const npm = platform === "win32"
+    ? { command: env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", "npm.cmd"] }
+    : { command: "npm", args: [] }
+  return { command: npm.command, args: [...npm.args, "ci", "--ignore-scripts"], cwd: resolve(root, ".opencode") }
 }
 
 function outputText(value) {

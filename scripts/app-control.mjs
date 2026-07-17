@@ -4,7 +4,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, write
 import { createConnection } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const runtimeDirectory = resolve(root, '.runtime');
@@ -38,7 +38,7 @@ const services = [
         name: 'backend',
         workspace: 'code/backend',
         port: backendPort,
-        processPattern: /(?:nodemon|ts-node).*src\/index\.ts/,
+        processPattern: /(?:nodemon|ts-node).*src[\\/]index\.ts/,
         args: ['--prefix', 'code/backend', 'run', 'dev'],
         env: { PORT: String(backendPort), APP_URL: frontendUrl },
     },
@@ -46,11 +46,38 @@ const services = [
         name: 'frontend',
         workspace: 'code/frontend',
         port: frontendPort,
-        processPattern: /(?:node[^\n]*\/vite|vite(?:\.js)?)(?:\s|$)/,
+        processPattern: /(?:node[^\n]*[\\/]vite|vite(?:\.js)?)(?:\s|$)/,
         args: ['--prefix', 'code/frontend', 'run', 'dev', '--', '--port', String(frontendPort)],
         env: { VITE_PROXY_TARGET: backendUrl },
     },
 ];
+
+export function npmInvocation(platform = process.platform, env = process.env) {
+    return platform === 'win32'
+        ? { command: env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', 'npm.cmd'] }
+        : { command: 'npm', args: [] };
+}
+
+function addressPort(address) {
+    const separator = address.lastIndexOf(':');
+    if (separator < 0) return null;
+    const port = Number(address.slice(separator + 1));
+    return Number.isInteger(port) ? port : null;
+}
+
+export function windowsPortOwnerPids(output, port) {
+    return [...new Set(output.split(/\r?\n/).flatMap((line) => {
+        const fields = line.trim().split(/\s+/);
+        if (fields.length < 5 || fields[0].toUpperCase() !== 'TCP') return [];
+        const pid = Number(fields.at(-1));
+        return addressPort(fields[1]) === port
+            && addressPort(fields[2]) === 0
+            && Number.isInteger(pid)
+            && pid > 1
+            ? [pid]
+            : [];
+    }))];
+}
 
 function pidPath(service) {
     return resolve(runtimeDirectory, `${service.name}.pid`);
@@ -79,6 +106,7 @@ function isAlive(pid) {
 }
 
 function processRows() {
+    if (process.platform === 'win32') return [];
     const result = spawnSync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' });
     if (result.status !== 0) return [];
     return result.stdout.split(/\r?\n/).flatMap((line) => {
@@ -97,14 +125,33 @@ function servicePids(service) {
 }
 
 function portOwnerPids(port) {
+    if (process.platform === 'win32') {
+        const result = spawnSync('netstat', ['-ano', '-p', 'TCP'], { encoding: 'utf8', windowsHide: true });
+        if (result.status !== 0) {
+            const detail = result.error?.message ?? String(result.stderr ?? '').trim() ?? 'netstat failed';
+            throw new Error(`Cannot inspect port ${port}: ${detail || 'netstat failed'}`);
+        }
+        return windowsPortOwnerPids(result.stdout, port).filter((pid) => pid !== process.pid);
+    }
     const result = spawnSync('lsof', ['-nP', '-t', `-iTCP:${port}`, '-sTCP:LISTEN'], { encoding: 'utf8' });
     if (result.status !== 0 && result.status !== 1) {
-        throw new Error(`Cannot inspect port ${port}: ${result.stderr.trim() || 'lsof failed'}`);
+        const detail = result.error?.message ?? String(result.stderr ?? '').trim();
+        throw new Error(`Cannot inspect port ${port}: ${detail || 'lsof failed'}`);
     }
     return [...new Set(result.stdout
         .split(/\r?\n/)
         .map((value) => Number(value.trim()))
         .filter((pid) => Number.isInteger(pid) && pid > 1 && pid !== process.pid))];
+}
+
+function terminatePid(pid, force = false) {
+    if (process.platform === 'win32') {
+        const args = ['/PID', String(pid), '/T'];
+        if (force) args.push('/F');
+        spawnSync('taskkill', args, { encoding: 'utf8', windowsHide: true });
+        return;
+    }
+    process.kill(pid, force ? 'SIGKILL' : 'SIGTERM');
 }
 
 function portOpen(port) {
@@ -153,14 +200,25 @@ async function startService(service) {
 
     mkdirSync(runtimeDirectory, { recursive: true });
     const log = openSync(logPath(service), 'a');
-    const child = spawn('npm', service.args, {
-        cwd: root,
-        detached: true,
-        env: { ...process.env, ...service.env, NO_COLOR: '1' },
-        stdio: ['ignore', log, log],
-    });
+    let child;
+    try {
+        child = await new Promise((resolveChild, rejectChild) => {
+            const invocation = npmInvocation();
+            const spawned = spawn(invocation.command, [...invocation.args, ...service.args], {
+                cwd: root,
+                detached: true,
+                env: { ...process.env, ...service.env, NO_COLOR: '1' },
+                stdio: ['ignore', log, log],
+                windowsHide: true,
+            });
+            spawned.once('error', rejectChild);
+            spawned.once('spawn', () => resolveChild(spawned));
+        });
+    } finally {
+        closeSync(log);
+    }
     child.unref();
-    closeSync(log);
+    if (!Number.isInteger(child.pid) || child.pid < 2) throw new Error(`Cannot start ${service.name}: npm returned no process ID`);
     writeFileSync(pidPath(service), `${child.pid}\n`);
 
     if (!await waitForPort(service.port, true)) {
@@ -184,15 +242,11 @@ async function stopService(service) {
     }
 
     for (const pid of pids) {
-        try {
-            process.kill(pid, 'SIGTERM');
-        } catch {}
+        try { terminatePid(pid); } catch {}
     }
     await waitForPort(service.port, false, 5_000);
     for (const pid of pids.filter(isAlive)) {
-        try {
-            process.kill(pid, 'SIGKILL');
-        } catch {}
+        try { terminatePid(pid, true); } catch {}
     }
     rmSync(pidPath(service), { force: true });
     if (await portOpen(service.port)) throw new Error(`${service.name} still owns port ${service.port}`);
@@ -206,17 +260,13 @@ async function stop() {
 async function clearServicePort(service) {
     const gracefulPids = [...new Set([...servicePids(service), ...portOwnerPids(service.port)])];
     for (const pid of gracefulPids) {
-        try {
-            process.kill(pid, 'SIGTERM');
-        } catch {}
+        try { terminatePid(pid); } catch {}
     }
 
     if (!await waitForPort(service.port, false, 5_000)) {
         const forcePids = [...new Set([...servicePids(service), ...portOwnerPids(service.port)])];
         for (const pid of forcePids) {
-            try {
-                process.kill(pid, 'SIGKILL');
-            } catch {}
+            try { terminatePid(pid, true); } catch {}
         }
         await waitForPort(service.port, false, 2_000);
     }
@@ -230,15 +280,22 @@ async function clearPorts() {
     for (const service of [...services].reverse()) await clearServicePort(service);
 }
 
-const command = process.argv[2];
-if (command === 'status') await status();
-else if (command === 'start') await start();
-else if (command === 'stop') await stop();
-else if (command === 'clear-ports') await clearPorts();
-else if (command === 'restart') {
-    await stop();
-    await start();
-} else {
-    console.error('Usage: node scripts/app-control.mjs <status|start|stop|restart|clear-ports>');
-    process.exitCode = 1;
+export async function runAppControl(command) {
+    if (command === 'status') return await status();
+    if (command === 'start') return await start();
+    if (command === 'stop') return await stop();
+    if (command === 'clear-ports') return await clearPorts();
+    if (command === 'restart') {
+        await stop();
+        return await start();
+    }
+    throw new Error('Usage: node scripts/app-control.mjs <status|start|stop|restart|clear-ports>');
+}
+
+const mainPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';
+if (mainPath === import.meta.url) {
+    runAppControl(process.argv[2]).catch((error) => {
+        console.error(`APP CONTROL: FAIL\n${error instanceof Error ? error.message : String(error)}`);
+        process.exitCode = 1;
+    });
 }
