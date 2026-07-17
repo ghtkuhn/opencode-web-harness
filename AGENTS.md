@@ -16,7 +16,7 @@
 * Planner analyzes the request, reads project evidence, and registers tasks. Planner does not implement or delegate.
 * Harness updates use the explicit project CLI `npm run harness:update`; natural-language keywords do not authorize or prioritize that operation automatically.
 * Executor schedules registered tasks, delegates one exact ready task, advances technical recovery, and completes a technically verified task. Executor does not implement or grade the result.
-* Worker executes the delegated task through the Doctor lifecycle. Worker does not rewrite task definitions or complete tasks.
+* Worker is the code implementer. Worker implements the delegated task by changing the required in-scope project files through the Doctor lifecycle; it does not merely verify or hand unchanged implementation work to Executor. Worker does not rewrite task definitions or complete tasks.
 * Planner and Executor do not read Worker rule files. Worker does not repair Harness state or unrelated project Memory.
 
 # Planning

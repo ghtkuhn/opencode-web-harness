@@ -76,7 +76,7 @@ Executor asks Doctor for runnable tasks and delegates only `READY` tasks. It res
 
 ### 3. Worker
 
-A Worker handles exactly one delegated task. It reads its rules and task, remains inside declared scope, and changes files only through a flat Preview followed by zero-argument Apply or Discard. The Harness validates the operation and runs any exact task verification commands mechanically. After `TASK DOCTOR: PASS`, Worker returns `REVIEWABLE` to Executor and stops.
+A Worker is the code implementer for exactly one delegated task. It reads its rules, task, and relevant current implementation, then makes the required in-scope project changes itself through a flat Preview followed by zero-argument Apply or Discard. It does not treat a successful preflight as a substitute for implementation or hand unchanged implementation work to Executor. The Harness validates the operation and runs any exact task verification commands mechanically. After implementation and `TASK DOCTOR: PASS`, Worker returns `REVIEWABLE` to Executor and stops.
 
 ### 4. Technical Completion
 

@@ -1173,6 +1173,8 @@ function canonicalWorkerPrompt(root: string, taskPath: string, state: any, revie
     ? [
         "ACTIVE TASK RESUME",
         `Task: ${taskPath}`,
+        "You are the code implementer for this task. Implement its concrete done facts yourself by changing the required in-scope project files. Do not merely verify, summarize, or return unchanged work for review.",
+        "A passing preflight or verification command before the required implementation is not task completion. Unless the task explicitly requires only inspection or verification, make the implementation changes before returning REVIEWABLE.",
         ruleInstruction,
         "This task is already TASK DOCTOR: STARTED. Begin now; do not wait for another STARTED message.",
         "Do not run Doctor lint, register, start, or schedule.",
@@ -1186,6 +1188,8 @@ function canonicalWorkerPrompt(root: string, taskPath: string, state: any, revie
     : [
         "REGISTERED TASK EXECUTION",
         `Task: ${taskPath}`,
+        "You are the code implementer for this task. Implement its concrete done facts yourself by changing the required in-scope project files. Do not merely verify, summarize, or return unchanged work for review.",
+        "A passing preflight or verification command before the required implementation is not task completion. Unless the task explicitly requires only inspection or verification, make the implementation changes before returning REVIEWABLE.",
         ruleInstruction,
         `Run npm run task:doctor:start -- ${taskPath} before implementation.`,
         "After STARTED, inspect one exact in-scope implementation file. The Harness runs the initial Doctor verify mechanically before that read.",
@@ -1233,7 +1237,8 @@ function canonicalWorkerPrompt(root: string, taskPath: string, state: any, revie
 
   sections.push([
     "TERMINAL RETURN CONTRACT",
-    `After TASK DOCTOR: PASS for ${taskPath}, return only REVIEWABLE and the exact Task path. Do not run Doctor complete.`,
+    `After you have implemented the task and TASK DOCTOR: PASS is reported for ${taskPath}, return only REVIEWABLE and the exact Task path. Do not run Doctor complete.`,
+    "Never use REVIEWABLE to ask Executor to implement, decide, or inspect work you did not perform.",
     "If Doctor cannot pass, return BLOCKED with Task, Doctor status, Failure, and Required owner.",
     "For TASK DOCTOR: EXECUTOR RECOVERY REQUIRED, set Required owner: Executor and stop. Do not restore Harness files, retry verify, or escalate to Planner.",
     "Never substitute manual verification for Doctor PASS.",
