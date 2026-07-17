@@ -259,6 +259,7 @@ npm run test:e2e
 | `scripts/update-harness.mjs` | Git-free release updater for managed Harness files |
 | `harness-manifest.json` | Authoritative list of files and package scripts owned by the Harness |
 | `.opencode/agents` | Definitions of the three agent roles |
+| `.opencode/lib/workflow-engine` | Pure workflow decisions, structured actions, and typed runtime state |
 | `.opencode/plugins` | Project-local Workflow Guards |
 | `project.json` | Central project configuration |
 | `AGENTS.md` | Authoritative working rules |

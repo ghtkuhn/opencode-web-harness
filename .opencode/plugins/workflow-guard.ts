@@ -116,6 +116,18 @@ import {
   type PlannerOwnership,
 } from "../lib/planner-ownership.ts"
 import { isOrnithModelIdentity, OrnithModelDriver, type DriverWorkflowState } from "./model-drivers/ornith.ts"
+import { renderAuthoritativeWorkflow } from "../lib/workflow-engine/authoritative-state.ts"
+import {
+  guardNotice,
+  renderGuardNotice,
+  renderWorkflowGuardMessage,
+  workflowAction,
+} from "../lib/workflow-engine/notices.ts"
+import { WorkflowRuntimeState } from "../lib/workflow-engine/runtime-state.ts"
+import { readAuthoritativeWorkflowSnapshot as readWorkflowSnapshot } from "../lib/workflow-engine/snapshot.ts"
+import { executeWorkflowEffects, reduceWorkflow } from "../lib/workflow-engine/engine.ts"
+import { clearFailures, recordFailure } from "../lib/workflow-engine/failure-window.ts"
+import type { AuthoritativeWorkflowDecision, WorkflowAction } from "../lib/workflow-engine/types.ts"
 
 type Feature =
   | "modeGuard"
@@ -769,110 +781,39 @@ function changedFilesForReview(root: string, state: any): string[] {
 }
 
 function authoritativeWorkflowState(root: string) {
-  const state = activeState(root)
-  const checkpoint = readJson(resolve(root, ".task-doctor/workflow-checkpoint.json"))
-  const savedFailure = readJson(resolve(root, ".task-doctor/last-doctor-failure.json"))
-  const openTasks = todoTasks(root).map((name) => `kanban/todo/${name}`)
-  const doctorStatus = typeof state?.status === "string" ? state.status : "none"
-  const doctorTask = typeof state?.taskPath === "string" ? state.taskPath : null
-  const doctorDestination = typeof state?.destination === "string" ? state.destination : null
-  const workerHelp = currentWorkerHelp(root, doctorTask, state?.taskHash)
-  const completedTask = doctorDestination
-    ?? (typeof checkpoint?.completedTask === "string" ? checkpoint.completedTask : null)
-  const lastDoctorFailure = savedFailure?.taskPath === doctorTask ? savedFailure : null
-  const memoryRecovery = projectMemoryRecoveryStatus(root)
-  const harnessRecovery = configFor(root).executorBaselineRecovery ? taskHarnessRecoveryStatus(root) : null
-  const plannerOwner = doctorTask ? readPlannerOwnership(root, doctorTask) : null
-  const plannerRecovery = plannerRecoveryState(root)
-  const activePlannerRecovery = plannerRecovery?.version === 1
-    && plannerRecovery.taskPath === doctorTask
-    && plannerRecovery.taskHash === state?.taskHash
-    && ["unavailable", "incomplete"].includes(plannerRecovery.status)
-      ? plannerRecovery
-      : null
-
-  let nextAction: string
-  if (memoryRecovery) {
-    nextAction = `Executor must read MEMORY.md and call recover_project_memory before delegation or review. Current size ${memoryRecovery.size}; limit ${memoryRecovery.maxSize}.`
-  } else if (harnessRecovery) {
-    nextAction = `Executor must inspect readable Harness paths and call recover_harness_baseline for ${harnessRecovery.taskPath} with exactly ${harnessRecovery.paths.map((entry) => entry.path).join(", ")}. WORKER rule files are opaque and must not be read outside Worker.`
-  } else if (activePlannerRecovery?.status === "unavailable") {
-    nextAction = `Executor must stop and tell the user that Planner ${activePlannerRecovery.plannerSessionID ?? "none"} is unavailable. The user must open a Planner and correct ${doctorTask} manually.`
-  } else if (activePlannerRecovery?.status === "incomplete") {
-    nextAction = `Executor must stop and tell the user to continue Planner ${activePlannerRecovery.plannerSessionID ?? "none"} manually because recovery did not finish.`
-  } else if (doctorStatus === "started" && doctorTask && workerHelp?.status === "pending") {
-    nextAction = `Executor must review Worker help ${workerHelp.id} through review_worker_help before delegating another Worker.`
-  } else if (doctorStatus === "started" && doctorTask && workerHelp?.status === "planner_unavailable") {
-    nextAction = `Executor must stop and tell the user that Planner ${plannerOwner?.plannerSessionID ?? "none"} is unavailable. The user must open a Planner and correct ${doctorTask} manually.`
-  } else if (doctorStatus === "started" && doctorTask && workerHelp?.status === "planner_recovery_incomplete") {
-    nextAction = `Executor must stop and tell the user to continue Planner ${plannerOwner?.plannerSessionID ?? "none"} manually because recovery did not finish.`
-  } else if (doctorStatus === "started" && doctorTask && (workerHelp?.status === "retry_approved" || workerHelp?.status === "task_changed")) {
-    nextAction = `Executor must delegate one fresh Worker for ${doctorTask} with the structured help guidance from ${workerHelp.id}.`
-  } else if (doctorStatus === "started" && doctorTask) {
-    nextAction = `Continue only ${doctorTask} through the Doctor lifecycle.`
-  } else if (doctorStatus === "passed" && doctorTask) {
-    nextAction = "Executor must call submit_task_review without arguments; the Harness completes the hash-bound technically verified task mechanically."
-  } else if (openTasks.length > 0) {
-    nextAction = "Executor must run npm run task:doctor:schedule and delegate its READY task. Worker starts it."
-  } else {
-    nextAction = "No automatic continuation. Follow the current explicit user request; otherwise stop and wait."
-  }
-
-  const revision = hash(JSON.stringify({
-    doctorStatus,
-    doctorTask,
-    doctorDestination,
-    completedTask,
-    openTasks,
-    nextAction,
-    lastDoctorFailure,
-    memoryRecovery,
-    harnessRecovery,
-    plannerOwner,
-    activePlannerRecovery,
-    workerHelp: workerHelp ? { id: workerHelp.id, status: workerHelp.status, taskPath: workerHelp.taskPath, problem: workerHelp.problem } : null,
-  })).slice(0, 12)
-
+  const transition = reduceWorkflow({ type: "authoritative.snapshot", snapshot: readWorkflowSnapshot({
+    doctorState: () => activeState(root),
+    checkpoint: () => readJson(resolve(root, ".task-doctor/workflow-checkpoint.json")),
+    lastDoctorFailure: () => readJson(resolve(root, ".task-doctor/last-doctor-failure.json")),
+    openTasks: () => todoTasks(root).map((name) => `kanban/todo/${name}`),
+    currentHelp: (taskPath, taskHash) => currentWorkerHelp(root, taskPath, taskHash),
+    memoryRecovery: () => projectMemoryRecoveryStatus(root),
+    harnessRecovery: () => configFor(root).executorBaselineRecovery ? taskHarnessRecoveryStatus(root) : null,
+    plannerOwner: (taskPath) => readPlannerOwnership(root, taskPath),
+    plannerRecovery: () => plannerRecoveryState(root),
+  }) })
+  const decision = transition.value as AuthoritativeWorkflowDecision
   return {
-    revision,
-    doctorStatus,
-    doctorTask,
-    doctorDestination,
-    completedTask,
-    openTasks,
-    nextAction,
-    lastDoctorFailure,
-    memoryRecovery,
-    harnessRecovery,
-    plannerOwner,
-    plannerRecovery: activePlannerRecovery,
-    workerHelp: workerHelp ? { id: workerHelp.id, status: workerHelp.status, taskPath: workerHelp.taskPath, problem: workerHelp.problem } : null,
+    revision: decision.revision,
+    doctorStatus: decision.doctor.status,
+    doctorTask: decision.doctor.taskPath,
+    doctorDestination: decision.doctor.destination,
+    completedTask: decision.completedTask,
+    openTasks: decision.openTasks,
+    nextAction: decision.nextAction.text,
+    decision,
   }
 }
 
 function authoritativeWorkflowStateText(root: string, nextActionOverride?: string, plannerRecoveryOverride?: string) {
   const state = authoritativeWorkflowState(root)
-  return [
-    "## Authoritative live workflow state",
-    "This block was generated from live Doctor and Kanban files for this request. It overrides contradictory conversation text and compaction summaries.",
-    `State revision: ${state.revision}`,
-    `Doctor status: ${state.doctorStatus}`,
-    `Doctor task: ${state.doctorTask ?? "none"}`,
-    `Doctor destination: ${state.doctorDestination ?? "none"}`,
-    `Last completed task: ${state.completedTask ?? "none"}`,
-    `Open Kanban tasks: ${state.openTasks.length > 0 ? state.openTasks.join(", ") : "none"}`,
-    state.workerHelp ? `Worker help: ${state.workerHelp.id} ${state.workerHelp.status} - ${state.workerHelp.problem}` : "Worker help: none",
-    `Owning Planner session: ${state.plannerOwner?.plannerSessionID ?? "none"}`,
-    plannerRecoveryOverride
-      ? `Planner recovery: ${plannerRecoveryOverride}`
-      : state.plannerRecovery
-        ? `Planner recovery: ${state.plannerRecovery.status} - ${state.plannerRecovery.reason}`
-        : "Planner recovery: none",
-    state.harnessRecovery ? `Harness recovery: required - ${state.harnessRecovery.paths.map((entry: any) => entry.path).join(", ")}` : "Harness recovery: none",
-    `Next action: ${nextActionOverride ?? state.nextAction}`,
-    state.lastDoctorFailure ? `Last Doctor failure (${state.lastDoctorFailure.gate}):\n${state.lastDoctorFailure.output}` : null,
-    "Do not restore, reopen, or repeat completed work unless the current explicit user request requires it.",
-  ].filter(Boolean).join("\n")
+  const override = nextActionOverride
+    ? workflowAction("workflow.session_override", "unknown", "continue", nextActionOverride)
+    : undefined
+  const rendered = renderAuthoritativeWorkflow(state.decision, override)
+  return plannerRecoveryOverride
+    ? rendered.replace(/^Planner recovery:.*$/m, `Planner recovery: ${plannerRecoveryOverride}`)
+    : rendered
 }
 
 function projectPathHasSymlink(root: string, path: string) {
@@ -1001,16 +942,19 @@ function canonicalPersistedGuardViolationId(savedID: unknown, problem: string, a
 function defaultGuardError(problem: string, action: string, success?: string, learned?: LearnedGuardRule) {
   const id = guardViolationId(problem, action)
   const persistable = knownStableGuardRule(id) !== null
-  return new Error([
-    "WORKFLOW GUARD BLOCKED",
-    `Guard learning ID: ${id}`,
-    `LEARNING_STATUS: ${learned ? "ALREADY_LEARNED" : persistable ? "NEW" : "TRANSIENT"}`,
-    `Problem: ${problem}`,
-    learned ? `Learned rule: ${learned.rule}` : null,
-    learned ? "Do not record this learning again." : null,
-    `Do next: ${action}`,
-    success ? `Continue only after: ${success}` : null,
-  ].filter(Boolean).join("\n"))
+  return new Error(renderGuardNotice(guardNotice(
+    id,
+    problem,
+    workflowAction(id, "unknown", "continue", action),
+    {
+      success,
+      learning: {
+        id,
+        status: learned ? "already" : persistable ? "new" : "transient",
+        rule: learned?.rule,
+      },
+    },
+  )))
 }
 
 function guardError(problem: string, action: string, success?: string) {
@@ -1465,26 +1409,27 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
   const doctorVerifyTimeoutMs = doctorVerifyTimeoutMsFor(root)
   const modeSettings = modeSettingsFor(root)
   const enabled = doctorProject(root)
-  const sessionFeedback = new Map<string, string>()
-  const repetitions = new Map<string, { signature: string; count: number }>()
-  const pendingCompact = new Set<string>()
-  const idlePromptedFor = new Map<string, string>()
-  const sessionTodos = new Map<string, Array<{ content: string; status: string }>>()
-  const doctorEvidence = new Map<string, Set<string>>()
-  const contextLimits = new Map<string, number>()
-  const sessionAgents = new Map<string, string>()
-  const sessionModels = new Map<string, string>()
-  const plannerQuestionCorrections = new Map<string, string>()
-  const plannerCompletionCorrections = new Map<string, string>()
-  const plannerEmptyStopRecoveries = new Map<string, number>()
-  const executorReadyAfterSchedule = new Map<string, string>()
-  const executorScheduledNoReady = new Set<string>()
-  const pendingGuardLearnings = new Map<string, Map<string, GuardViolation>>()
-  const guardLearningPromptedFor = new Map<string, string>()
-  const workerRuleReads = new Map<string, Set<string>>()
-  const workerTaskReads = new Map<string, { taskPath: string; taskHash: string }>()
-  const workerFileReads = new Map<string, Map<string, { taskPath: string; taskHash: string; fileHash: string }>>()
-  const pendingAutomaticWorkerTaskReads = new Map<string, {
+  const runtimeState = new WorkflowRuntimeState()
+  const sessionFeedback = runtimeState.map<string>("sessionFeedback")
+  const repetitions = runtimeState.map<{ signature: string; count: number }>("repetitions")
+  const pendingCompact = runtimeState.set("pendingCompact")
+  const idlePromptedFor = runtimeState.map<string>("idlePromptedFor")
+  const sessionTodos = runtimeState.map<Array<{ content: string; status: string }>>("sessionTodos")
+  const doctorEvidence = runtimeState.map<Set<string>>("doctorEvidence")
+  const contextLimits = runtimeState.map<number>("contextLimits")
+  const sessionAgents = runtimeState.map<string>("sessionAgents")
+  const sessionModels = runtimeState.map<string>("sessionModels")
+  const plannerQuestionCorrections = runtimeState.map<string>("plannerQuestionCorrections")
+  const plannerCompletionCorrections = runtimeState.map<string>("plannerCompletionCorrections")
+  const plannerEmptyStopRecoveries = runtimeState.map<number>("plannerEmptyStopRecoveries")
+  const executorReadyAfterSchedule = runtimeState.map<string>("executorReadyAfterSchedule")
+  const executorScheduledNoReady = runtimeState.set("executorScheduledNoReady")
+  const pendingGuardLearnings = runtimeState.map<Map<string, GuardViolation>>("pendingGuardLearnings")
+  const guardLearningPromptedFor = runtimeState.map<string>("guardLearningPromptedFor")
+  const workerRuleReads = runtimeState.map<Set<string>>("workerRuleReads")
+  const workerTaskReads = runtimeState.map<{ taskPath: string; taskHash: string }>("workerTaskReads")
+  const workerFileReads = runtimeState.map<Map<string, { taskPath: string; taskHash: string; fileHash: string }>>("workerFileReads")
+  const pendingAutomaticWorkerTaskReads = runtimeState.map<{
     callID: string | null
     taskPath: string
     taskHash: string
@@ -1496,76 +1441,76 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
     modelRulesFile: string
     requiredRuleHashes: Array<{ path: string; hash: string }>
     mutationRevision: number
-  }>()
-  const workerDoctorPreflights = new Map<string, { taskPath: string; taskHash: string; mutationRevision: number }>()
-  const workerFindingTargets = new Map<string, string>()
-  const workerFindingReads = new Map<string, string>()
-  const workerVerifyRequired = new Set<string>()
-  const workerMechanicalDoctorNotices = new Map<string, {
+  }>("pendingAutomaticWorkerTaskReads")
+  const workerDoctorPreflights = runtimeState.map<{ taskPath: string; taskHash: string; mutationRevision: number }>("workerDoctorPreflights")
+  const workerFindingTargets = runtimeState.map<string>("workerFindingTargets")
+  const workerFindingReads = runtimeState.map<string>("workerFindingReads")
+  const workerVerifyRequired = runtimeState.set("workerVerifyRequired")
+  const workerMechanicalDoctorNotices = runtimeState.map<{
     taskPath: string
     taskHash: string
     status: ValidatedMechanicalDoctorRun["status"]
     output: string
     findingTarget: string | null
     runID: string
-  }>()
-  const mechanicalDoctorPreflightInFlight = new Map<string, Promise<{
+  }>("workerMechanicalDoctorNotices")
+  const mechanicalDoctorPreflightInFlight = runtimeState.map<Promise<{
     run: ValidatedMechanicalDoctorRun
     mutationRevision: number
-  }>>()
+  }>>("mechanicalDoctorPreflightInFlight")
   let mechanicalDoctorQueueTail: Promise<void> = Promise.resolve()
   let workerMutationRevision = 0
-  const pendingReviewedWorkerRetries = new Map<string, Array<{
+  const pendingReviewedWorkerRetries = runtimeState.map<Array<{
     helpID: string
     taskPath: string
     taskHash: string
     findingTarget: string | null
     findingTargetRevision: string | null
     queuedAt: number
-  }>>()
-  const pendingHelpDelegations = new Map<string, Array<{
+  }>>("pendingReviewedWorkerRetries")
+  const pendingHelpDelegations = runtimeState.map<Array<{
     helpID: string
     priorStatus: "retry_approved" | "task_changed"
     queuedAt: number
     callID: string | null
     source: "direct" | "mechanical"
     attemptNonce: string | null
-  }>>()
-  const baseContinuationPrompts = new Map<string, Promise<void>>()
-  const activeBoostResumeCalls = new Map<string, { callID: string; parentSessionID: string }>()
-  const executorReviewReads = new Map<string, Map<string, string>>()
-  const executorHelpReviewPending = new Map<string, string>()
-  const executorHelpReReviewRequested = new Map<string, string>()
-  const executorPlannerRecoveryRequested = new Map<string, { taskPath: string; taskHash: string }>()
-  const malformedWorkflowToolRetries = new Map<string, {
+  }>>("pendingHelpDelegations")
+  const baseContinuationPrompts = runtimeState.map<Promise<void>>("baseContinuationPrompts")
+  const activeBoostResumeCalls = runtimeState.map<{ callID: string; parentSessionID: string }>("activeBoostResumeCalls")
+  const executorReviewReads = runtimeState.map<Map<string, string>>("executorReviewReads")
+  const executorHelpReviewPending = runtimeState.map<string>("executorHelpReviewPending")
+  const executorHelpReReviewRequested = runtimeState.map<string>("executorHelpReReviewRequested")
+  const executorPlannerRecoveryRequested = runtimeState.map<{ taskPath: string; taskHash: string }>("executorPlannerRecoveryRequested")
+  const malformedWorkflowToolRetries = runtimeState.map<{
     target: string
     revision: string
     attempts: number
     seenCallIDs: Set<string>
     feedback: string
-  }>()
-  const sessionIdentityHydrations = new Map<string, Promise<void>>()
-  const subagentParents = new Map<string, string>()
-  const observedTerminalToolParts = new Map<string, Set<string>>()
-  const archivedWorkerSessions = new Set<string>()
-  const workerSessionArchiveAttempts = new Map<string, Promise<boolean>>()
-  const reviewableWorkerSessions = new Map<string, Set<string>>()
-  const requestedWorkerSessionResumes = new Map<string, number>()
-  const loopFailures = new Map<string, Map<string, { count: number; lastAt: number; fingerprint: LoopFailureFingerprint }>>()
-  const doctorFailures = new Map<string, Map<string, { count: number; lastAt: number; fingerprint: LoopFailureFingerprint }>>()
-  const workerHelpRequired = new Map<string, { count: number; fingerprint: LoopFailureFingerprint; reason?: "repeated" | "slow" }>()
-  const workerDoctorStartedAt = new Map<string, {
+  }>("malformedWorkflowToolRetries")
+  const sessionIdentityHydrations = runtimeState.map<Promise<void>>("sessionIdentityHydrations")
+  const subagentParents = runtimeState.map<string>("subagentParents")
+  const observedTerminalToolParts = runtimeState.map<Set<string>>("observedTerminalToolParts")
+  const archivedWorkerSessions = runtimeState.set("archivedWorkerSessions")
+  const workerSessionArchiveAttempts = runtimeState.map<Promise<boolean>>("workerSessionArchiveAttempts")
+  const reviewableWorkerSessions = runtimeState.map<Set<string>>("reviewableWorkerSessions")
+  const requestedWorkerSessionResumes = runtimeState.map<number>("requestedWorkerSessionResumes")
+  const loopFailures = runtimeState.map<Map<string, { count: number; lastAt: number; fingerprint: LoopFailureFingerprint }>>("loopFailures")
+  const doctorFailures = runtimeState.map<Map<string, { count: number; lastAt: number; fingerprint: LoopFailureFingerprint }>>("doctorFailures")
+  const workerHelpRequired = runtimeState.map<{ count: number; fingerprint: LoopFailureFingerprint; reason?: "repeated" | "slow" }>("workerHelpRequired")
+  const workerDoctorStartedAt = runtimeState.map<{
     startedAt: number
     mutationRevision: number
     taskPath: string
     taskHash: string | null
-  }>()
-  const workerHelpTerminalSessions = new Set<string>()
-  const workerHarnessRecoveryTerminals = new Map<string, { taskPath: string; taskHash: string }>()
-  const terminalExecutorReasons = new Map<string, string>()
-  const terminalRoleLoopReasons = new Map<string, string>()
-  const activePlannerRecoveries = new Map<string, ActivePlannerRecovery>()
-  const guardLearningResumePending = new Map<string, string>()
+  }>("workerDoctorStartedAt")
+  const workerHelpTerminalSessions = runtimeState.set("workerHelpTerminalSessions")
+  const workerHarnessRecoveryTerminals = runtimeState.map<{ taskPath: string; taskHash: string }>("workerHarnessRecoveryTerminals")
+  const terminalExecutorReasons = runtimeState.map<string>("terminalExecutorReasons")
+  const terminalRoleLoopReasons = runtimeState.map<string>("terminalRoleLoopReasons")
+  const activePlannerRecoveries = runtimeState.map<ActivePlannerRecovery>("activePlannerRecoveries")
+  const guardLearningResumePending = runtimeState.map<string>("guardLearningResumePending")
   const lastDoctorFailurePath = resolve(root, ".task-doctor/last-doctor-failure.json")
   const guardLearningQueuePath = resolve(root, ".task-doctor/pending-guard-learnings.json")
   const guardLearningAuthorizationPath = resolve(root, ".task-doctor/authorized-custom-changes.json")
@@ -4864,14 +4809,11 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       if (savedFailure?.gate === "verify" && savedFailure?.taskPath === expectedState.taskPath) {
         rmSync(lastDoctorFailurePath, { force: true })
       }
-      const failures = doctorFailures.get(sessionID)
-      if (failures) {
-        for (const [signature, failure] of failures) {
-          if (failure.fingerprint.tool === "task:doctor:verify"
-            && failure.fingerprint.target === expectedState.taskPath) failures.delete(signature)
-        }
-        if (failures.size === 0) doctorFailures.delete(sessionID)
-      }
+      const remainingFailures = clearFailures(doctorFailures.get(sessionID), (fingerprint) => (
+        fingerprint.tool === "task:doctor:verify" && fingerprint.target === expectedState.taskPath
+      ))
+      if (remainingFailures.size === 0) doctorFailures.delete(sessionID)
+      else doctorFailures.set(sessionID, remainingFailures)
       sessionFeedback.set(sessionID, [
         run.output,
         `Mechanical Doctor verify passed for ${expectedState.taskPath}.`,
@@ -4902,16 +4844,18 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
     if (source === "post_apply") {
       const fingerprint = doctorFailureFingerprint("verify", expectedState.taskPath, run.output)
       if (fingerprint) {
-        const failures = doctorFailures.get(sessionID)
-          ?? new Map<string, { count: number; lastAt: number; fingerprint: LoopFailureFingerprint }>()
-        const previous = failures.get(fingerprint.signature)
-        const now = Date.now()
-        const count = previous && now - previous.lastAt <= 10 * 60_000 ? previous.count + 1 : 1
-        failures.set(fingerprint.signature, { count, lastAt: now, fingerprint })
-        doctorFailures.set(sessionID, failures)
         const slowFailure = run.elapsedMs >= longDoctorFailureMs
-        if (count >= doctorFailureThreshold || slowFailure) {
-          const required = { count, fingerprint, reason: slowFailure ? "slow" as const : "repeated" as const }
+        const window = recordFailure({
+          history: doctorFailures.get(sessionID),
+          fingerprint,
+          now: Date.now(),
+          windowMs: 10 * 60_000,
+          threshold: doctorFailureThreshold,
+          slow: slowFailure,
+        })
+        doctorFailures.set(sessionID, window.history)
+        if (window.terminal) {
+          const required = { count: window.count, fingerprint, reason: window.reason! }
           workerHelpRequired.set(sessionID, required)
           const pendingLearnings = pendingGuardLearningsForAgent(sessionID)
           const persistedHelp = pendingLearnings.size === 0
@@ -4925,7 +4869,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
               ].join("\n")
             : [
                 "MODEL LOOP STOP",
-                `${count} equivalent Doctor failures occurred for ${expectedState.taskPath} at verify.`,
+                `${window.count} equivalent Doctor failures occurred for ${expectedState.taskPath} at verify.`,
                 `Latest problem: ${fingerprint.problem}`,
                 "Record pending Guard learning, then call request_executor_help and stop.",
               ].join("\n"))
@@ -6590,51 +6534,46 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
     if (requestedPlannerRecovery && !currentPlannerRecoveryRequest) executorPlannerRecoveryRequested.delete(sessionID)
     const deterministicRecoveryPending = projectMemoryRecoveryStatus(root)
       || (features.executorBaselineRecovery ? taskHarnessRecoveryStatus(root) : null)
-    const plannerRecoveryNextAction = activePlannerRecovery
-      ? activePlannerRecovery.lifecycle === "active"
-        ? activePlannerRecovery.contract.supersedeTasks.some((path) => !activePlannerRecovery.supersededTasks.has(path))
-          ? `Planner must call supersede_registered_task now for ${activePlannerRecovery.contract.supersedeTasks.find((path) => !activePlannerRecovery.supersededTasks.has(path))}. Do not inspect, summarize, implement, delegate, or follow the generic Doctor continuation.`
-          : activePlannerRecovery.exactContract
-            ? `Planner must call revise_active_task now for ${activePlannerRecovery.taskPath} with only task_path and one concise reason. The trusted tool already holds and renders the exact final contract. Do not inspect, summarize, implement, delegate, or follow the generic Doctor continuation.`
-            : `Planner must call revise_active_task now for ${activePlannerRecovery.taskPath} with the structured additions from the active recovery request. Do not implement, delegate, or follow the generic Doctor continuation.`
-        : `Planner must correct ${activePlannerRecovery.taskPath}, then run its exact Doctor lint and register commands now. Do not implement, delegate, or follow the generic Doctor continuation.`
-      : undefined
-    const helpReviewNextAction = plannerRecoveryNextAction
-      ?? (deterministicRecoveryPending || terminalExecutorReasons.has(sessionID)
-        ? undefined
-        : pendingHelpReviewID
-          ? `Executor must call review_worker_help for ${pendingHelpReviewID} again now because newer full-file evidence is loaded. Do not delegate Worker, even if the stored help status still says retry_approved; this in-session review checkpoint is newer and must be finalized first.`
-          : requestedHelpReReviewID
-            ? `Executor must re-review Worker help ${requestedHelpReReviewID} through review_worker_help now because the current user explicitly requested review before delegation. Do not delegate Worker from the stored retry_approved state; this request is newer.`
-            : currentPlannerRecoveryRequest
-              ? pendingFrozenPlannerReview
-                ? `Executor must call escalate_to_planner now with only task_path=${currentPlannerRecoveryRequest.taskPath}. The pending frozen receipt restores every other field mechanically; do not reconstruct or add them. Do not schedule or delegate until it returns PLANNER RECOVERY COMPLETE.`
-                : `Executor must call escalate_to_planner for ${currentPlannerRecoveryRequest.taskPath} now with file-backed evidence and the exact recovery contract from the current user request. Do not schedule or delegate until it returns PLANNER RECOVERY COMPLETE.`
-              : undefined)
     const agent = sessionAgents.get(sessionID) ?? ""
     const scheduledReady = executorReadyAfterSchedule.get(sessionID)
-    const plannerNextAction = modeSettings.plannerAgents.has(agent)
-      && plannerOwnedTodoTasks(root, sessionID).some((taskPath) => taskRegistrationValid(root, taskPath.split("/").pop()!))
-      ? "Planner must run npm run task:doctor:schedule once, then stop."
-      : undefined
-    const scheduledReadyNextAction = modeSettings.executorAgents.has(agent) && scheduledReady
-      ? `Executor must delegate ${scheduledReady} now. Do not inspect or schedule.`
-      : undefined
-    const executorNextAction = modeSettings.executorAgents.has(agent)
-      && currentState?.status !== "started"
-      && currentState?.status !== "passed"
-      && !executorScheduledNoReady.has(sessionID)
-      ? "Executor must run npm run task:doctor:schedule."
-      : undefined
-    const workerNextAction = modeSettings.workerAgents.has(agent)
-      && currentState?.status !== "started"
-      && currentState?.status !== "passed"
-      ? "Worker must follow its exact task prompt; never schedule."
-      : undefined
+    const role = modeSettings.plannerAgents.has(agent)
+      ? "planner"
+      : modeSettings.executorAgents.has(agent)
+        ? "executor"
+        : modeSettings.workerAgents.has(agent)
+          ? "worker"
+          : "unknown"
+    const sessionAction = reduceWorkflow({ type: "session.action", input: {
+      role,
+      doctorStatus: currentState?.status ?? "none",
+      deterministicRecoveryPending: Boolean(deterministicRecoveryPending),
+      terminalExecutorReason: terminalExecutorReasons.get(sessionID),
+      activePlannerRecovery: activePlannerRecovery
+        ? {
+            lifecycle: activePlannerRecovery.lifecycle,
+            taskPath: activePlannerRecovery.taskPath,
+            exactContract: activePlannerRecovery.exactContract,
+            supersedeTasks: activePlannerRecovery.contract.supersedeTasks,
+            supersededTasks: [...activePlannerRecovery.supersededTasks],
+          }
+        : null,
+      pendingHelpReviewID,
+      requestedHelpReReviewID,
+      plannerRecoveryRequest: currentPlannerRecoveryRequest
+        ? { taskPath: currentPlannerRecoveryRequest.taskPath, frozen: pendingFrozenPlannerReview }
+        : null,
+      plannerHasRegisteredTasks: role === "planner"
+        && plannerOwnedTodoTasks(root, sessionID).some((taskPath) => taskRegistrationValid(root, taskPath.split("/").pop()!)),
+      scheduledReadyTask: role === "executor" ? scheduledReady : null,
+      executorScheduleRequired: role === "executor"
+        && currentState?.status !== "started"
+        && currentState?.status !== "passed"
+        && !executorScheduledNoReady.has(sessionID),
+    } }).value as WorkflowAction | null
     const liveState = features.authoritativeContinuationState
       ? authoritativeWorkflowStateText(
           root,
-          helpReviewNextAction ?? plannerNextAction ?? scheduledReadyNextAction ?? executorNextAction ?? workerNextAction,
+          sessionAction?.text,
           activePlannerRecovery ? `active trusted recovery for ${activePlannerRecovery.taskPath}` : undefined,
         )
       : null
@@ -6644,17 +6583,12 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
     const pendingLearnings = features.guardLearning && !terminalWorkerHarnessRecovery
       ? [...pendingGuardLearningsForAgent(sessionID).values()]
       : []
-    if (!feedback && !savedCheckpoint && !liveState && pendingLearnings.length === 0) return null
-    return [
-      "## Workflow guard state",
-      "This local synthetic message is authoritative workflow state, not a new user request. It overrides stale conversation text and summaries.",
-      feedback ? `Latest blocking feedback:\n${feedback}` : null,
-      pendingLearnings.length > 0
-        ? `Pending Guard learnings must be recorded with record_guard_learning before other work:\n${pendingLearnings.map((violation) => `${violation.id}: ${violation.action}`).join("\n")}`
-        : null,
-      liveState ?? (savedCheckpoint ? `Latest checkpoint:\n${JSON.stringify(savedCheckpoint)}` : null),
-      "Treat Doctor failures as blocking. Do not repeat a failed action unchanged.",
-    ].filter(Boolean).join("\n\n")
+    return renderWorkflowGuardMessage({
+      feedback,
+      learningActions: pendingLearnings.map((violation) => ({ id: violation.id, action: violation.action })),
+      liveState,
+      checkpoint: savedCheckpoint,
+    })
   }
 
   return {
@@ -9869,232 +9803,92 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
         }
       }
 
-      if (features.modeGuard && plannerMode) {
-        const plannerDoctor = /^npm\s+run\s+task:doctor:(?:next|schedule)\s*$/.test(command)
+      if (features.modeGuard) {
+        const role = plannerMode ? "planner" : executorMode ? "executor" : workerMode ? "worker" : "unknown"
+        const plannerDoctor = input.tool === "bash" && /^npm\s+run\s+task:doctor:(?:next|schedule)\s*$/.test(command)
         const plannerInspection = input.tool === "bash" && plannerReadOnlyCommand(command)
-        const plannerOperation = input.tool === "bash" && plannerAppCommand.test(command)
-        if (input.tool === "question" && plannerExecutionQuestion(output.args)) {
-          throw guardError(
-            "Planner attempted to ask whether tasks should be delegated or executed.",
-            "Do not ask this decision. Report that the registered tasks are ready for Executor, then stop. Only Executor may delegate Worker.",
-          )
-        }
-        if (invocation && ["lint", "register"].includes(invocation.gate)) {
-          throw guardError(
-            `Planner attempted Doctor ${invocation.gate} directly for ${invocation.taskPath}.`,
-            "Call register_planner_task with only title, exact files, concrete done facts, and depends_on only when needed. The trusted tool derives and registers the canonical task atomically.",
-            `PLANNER TASK REGISTERED ${invocation.taskPath}`,
-          )
-        }
-        if (invocation && !plannerDoctor) {
-          throw guardError(
-            `Planner cannot run Doctor ${invocation.gate}.`,
-            "Use register_planner_task for new tasks and only Doctor next or schedule directly. Switch to Worker before start, verify, complete, whitelist, or test-file.",
-          )
-        }
-        if (writeTools.has(input.tool)) {
-          const state = activeState(root)
-          if (state?.status === "started" && paths.includes(state.taskPath)) {
-            throw guardError(
-              `Planner attempted to edit active task ${state.taskPath} directly.`,
-              `Call revise_active_task with ${state.taskPath}, the reason, and only the needed structured additions. Omit replacement unless the whole task definition must change.`,
-            )
-          }
-          const taskDraft = paths.find((path) => planningPath.test(path))
-          if (features.planningEnforcer && taskDraft) {
-            throw guardError(
-              `Planner attempted to write task file ${taskDraft} directly.`,
-              "Call register_planner_task with only title, exact files, concrete done facts, and depends_on only when needed. It derives canonical task metadata and registers atomically.",
-              `PLANNER TASK REGISTERED ${taskDraft}`,
-            )
-          }
-          if (!plannerWrite) {
-            throw guardError(
-              "Planner attempted to change a path outside kanban/todo or MEMORY.md.",
-              "Stay in Planner mode and write only approved Kanban tasks or durable memory. Switch to Worker before implementation.",
-            )
-          }
-        } else if (input.tool === "bash" && !plannerDoctor && !plannerInspection && !plannerOperation) {
-          throw guardError(
-            "Planner attempted a shell command outside the read-only and fixed app-operation allowlist.",
-            "Use one read-only command without pipes, redirects, chaining, or substitution. For runtime control use exactly npm run app:status, app:start, app:stop, or app:restart. Switch to Worker before implementation.",
-          )
-        }
+        const planningTaskPath = paths.find((path) => planningPath.test(path))
+        const roleState = plannerMode ? activeState(root) : null
+        const block = reduceWorkflow({ type: "role.tool", input: {
+          role,
+          tool: input.tool,
+          command,
+          writes: writeTools.has(input.tool),
+          invocation,
+          plannerDoctor,
+          plannerInspection,
+          plannerOperation: plannerMode && input.tool === "bash" && plannerAppCommand.test(command),
+          plannerWrite,
+          plannerExecutionQuestion: plannerMode && input.tool === "question" && plannerExecutionQuestion(output.args),
+          planningEnforcer: features.planningEnforcer,
+          planningTaskPath,
+          activeTask: roleState?.taskPath ? { status: roleState.status, taskPath: roleState.taskPath } : null,
+          taskChangePermission: features.taskChangePermission,
+        } }).value as { problem: string; action: string; success?: string } | null
+        if (block) throw guardError(block.problem, block.action, block.success)
       }
-      if (features.modeGuard && executorMode) {
-        const executorNext = input.tool === "bash" && /^npm\s+run\s+task:doctor:(?:next|schedule)\s*$/.test(command)
-        const executorInspection = input.tool === "bash" && plannerReadOnlyCommand(command)
-        if (writeTools.has(input.tool)) {
-          throw guardError(
-            "Executor attempted to change a file.",
-            "Delegate implementation to Worker through the task tool. Executor may only inspect results with read-only commands.",
-          )
-        }
-        if (invocation) {
-          throw guardError(
-            `Executor cannot run Doctor ${invocation.gate}.`,
-            "Delegate the exact registered task to Worker. Only Worker may run the Doctor lifecycle.",
-          )
-        }
-        if (input.tool === "bash" && !executorNext && !executorInspection) {
-          throw guardError(
-            "Executor attempted a shell command outside the read-only allowlist.",
-            "Use one read-only command or task:doctor:schedule. Delegate every mutation and Doctor lifecycle command to Worker.",
-          )
-        }
-      }
-      if (features.modeGuard && workerMode && writeTools.has(input.tool) && paths.some((path) => planningPath.test(path))) {
-        throw guardError(
-          "Worker attempted to create or rewrite a Kanban task.",
-          features.taskChangePermission
-            ? "Do not retry the edit. If Doctor lint requires this correction before start, call request_task_change_permission with the exact task path, reason, old text, and new text. The user must approve it. Otherwise stop and report the blocker."
-            : "Switch to Planner for task authoring. Worker may only execute an already registered task through Doctor.",
-        )
-      }
-      if (features.taskMemoryAppend && workerMode && mutation && paths.includes("MEMORY.md")) {
-        const state = activeState(root)
-        if (state?.status === "started" && state.memoryAction === "append") {
-          throw guardError(
-            "Worker attempted to edit append-only MEMORY.md directly.",
-            `Call append_task_memory with task_path ${state.taskPath} and one concise durable fact without a timestamp. The tool restores the Doctor baseline, adds the timestamp, and appends exactly once.`,
-            `TASK MEMORY APPENDED ${state.taskPath}`,
-          )
-        }
-      }
-
-      if (features.modeGuard && workerMode && input.tool === "bash" && /^npm\s+run\s+task:doctor:schedule(?:\s|$)/.test(command.trim())) {
-        const state = activeState(root)
-        throw guardError(
-          "Worker attempted to run the Executor scheduling command.",
-          state?.status === "started"
-            ? `Do not schedule or start again. Continue active task ${state.taskPath} from the current finding; Apply verifies mechanically. Use verify_worker_task only when a tool result explicitly requires the fallback, then return a REVIEWABLE handoff after PASS.`
-            : "Stop and report that the delegated task was not READY. Only Executor may schedule and delegate tasks.",
-        )
-      }
-
-      if (features.contextCheckpoint && pendingCompact.has(input.sessionID) && !executorMode && input.tool !== "record_guard_learning") {
-        throw guardError(
-          "A Kanban task just completed and the mandatory context-threshold check is pending.",
-          "Stop the current turn without another tool call. At session idle the guard will compact when the configured percentage is reached, then continue the requested batch.",
-        )
-      }
-
-      if (doctorCommandMention.test(command) && /\||&&|;|[<>]/.test(command)) {
-        const task = todoTasks(root)[0] ? `kanban/todo/${todoTasks(root)[0]}` : "kanban/todo/<task>.md"
-        throw guardError(
-          "A Doctor command was combined, piped, redirected, or filtered, so its lifecycle and authoritative output could be altered.",
-          `Run the Doctor command alone without other commands, 2>&1, pipes, filters, redirects, semicolons, or &&. Use the current task path ${task}.`,
-        )
-      }
-
       const runningTask = activeState(root)
       const taskPaths = todoTasks(root).map((name) => `kanban/todo/${name}`)
-      if (features.executorReview && workerMode && invocation?.gate === "complete") {
-        throw guardError(
-          "Worker attempted Doctor complete, which belongs to the trusted Executor review transition.",
-          `Do not run Doctor complete. Return REVIEWABLE with the exact Task path ${invocation.taskPath}, then stop. Executor calls zero-argument submit_task_review to complete it.`,
-        )
-      }
-      if (workerMode && invocation?.gate === "start" && (runningTask?.status === "started" || runningTask?.status === "passed") && invocation.taskPath === runningTask.taskPath) {
-        throw guardError(
-          `${runningTask.taskPath} is already ${runningTask.status}.`,
-          runningTask.status === "passed"
-            ? `Do not start it again or change implementation. Return the existing REVIEWABLE state to Executor for review.`
-            : `Do not lint, register, start, or schedule again. Continue ${runningTask.taskPath} from the current finding; Apply verifies mechanically. Use verify_worker_task only for an explicitly requested fallback, then return REVIEWABLE after PASS.`,
-        )
-      }
-      if (doctorCommandMention.test(command) && !isDoctorCommand(command)) {
-        const task = runningTask?.taskPath ?? taskPaths[0] ?? "kanban/todo/<task>.md"
-        throw guardError(
-          "The Doctor command is unsupported or missing its exact task path.",
-          `Use only schedule, next, lint, register, start, verify, complete, whitelist, or test-file. Run npm run task:doctor:schedule and use an exact READY path. Current path: ${task}.`,
-        )
-      }
-      if (invocation && ["lint", "register"].includes(invocation.gate) && !taskPaths.includes(invocation.taskPath)) {
-        const requestedStem = invocation.taskPath.split("/").pop()?.replace(/\.md$/, "")
-        const suggested = taskPaths.find((path) => path.split("/").pop()?.replace(/\.md$/, "") === requestedStem) ?? taskPaths[0] ?? "kanban/todo/<task>.md"
-        throw guardError(
-          `${invocation.taskPath} is not an exact Kanban task path.`,
-          `Run npm run task:doctor:${invocation.gate} -- ${suggested}. Keep kanban/todo/ and the .md suffix.`,
-          `TASK DOCTOR: ${invocation.gate === "lint" ? "LINT PASS" : "REGISTERED"} ${suggested}`,
-        )
-      }
-      if (invocation && runningTask?.status === "started" && invocation.taskPath !== runningTask.taskPath) {
-        throw guardError(
-          `${runningTask.taskPath} is still active, so Doctor ${invocation.gate} cannot run for ${invocation.taskPath}.`,
-          `Stay on ${runningTask.taskPath}. Fix its latest in-scope finding through the transactional tools; Apply verifies mechanically. Never run Worker verify through Bash.`,
-          `TASK DOCTOR: COMPLETED kanban/done/${runningTask.taskPath.split("/").pop()}`,
-        )
-      }
-
-      if (features.internalFileGuard && !isDoctorCommand(command)) {
-        const protectedPath = paths.find((path) => isProtected(path, protectedPaths))
-        const protectedInCommand = protectedPaths.find((path) => command.includes(path))
-        if (protectedPath || protectedInCommand) {
-          const task = todoTasks(root)[0] ? `kanban/todo/${todoTasks(root)[0]}` : "kanban/todo/<task>.md"
-          throw guardError(
-            `${protectedPath ?? protectedInCommand} is an internal workflow path and cannot be inspected or changed by the coding agent.`,
-            runningTask?.status === "started"
-              ? `Do not inspect workflow internals. Continue ${runningTask.taskPath} from the current finding; Apply verifies mechanically and verify_worker_task is only the explicit fallback.`
-              : runningTask?.status === "passed"
-                ? `Do not inspect workflow internals or change implementation. Return the REVIEWABLE state to Executor for review.`
-                : `Do not inspect the implementation. Follow Doctor output. For the current task use npm run task:doctor:lint -- ${task}, then register, start, verify, and complete as instructed.`,
-          )
-        }
-      }
-
-
-      if (features.internalFileGuard && mutation) {
-        const readOnlyPath = paths.find((path) => isProtected(path, readOnlyPaths))
-        const readOnlyInCommand = readOnlyPaths.find((path) => command.includes(path))
-        if (readOnlyPath || readOnlyInCommand) {
-          throw guardError(
-            `${readOnlyPath ?? readOnlyInCommand} is read-only for the coding agent.`,
-            "Read the file and follow it. Use the dedicated workflow tool for authorized changes; never edit, delete, restore, or move it directly.",
-          )
-        }
-      }
-
-      if (features.todoDiscipline && input.tool === "todowrite") {
-        const todos = Array.isArray(output.args?.todos) ? output.args.todos : []
-        if (todos.length > 5) throw guardError(
-          "The internal todo list has more than five entries.",
-          "Rewrite it with at most five steps for only the current Kanban task.",
-        )
-        if (todos.filter((todo: any) => todo?.status === "in_progress").length > 1) {
-          throw guardError("More than one internal todo is in progress.", "Keep exactly one current step in_progress and set the others to pending or completed.")
-        }
-        const taskNames = new Set(todos.flatMap((todo: any) => String(todo?.content ?? "").match(/\b\d{2,3}-[\w-]+\.md\b/g) ?? []))
-        if (taskNames.size > 1) throw guardError("The internal todo list mixes multiple Kanban tasks.", "Keep only the current lexicographic Kanban task in the internal list.")
-        const evidence = doctorEvidence.get(input.sessionID) ?? new Set<string>()
-        for (const todo of todos) {
-          const gate = String(todo?.content ?? "").match(/doctor\s*:?(lint|register|start|verify|complete)/i)?.[1]?.toLowerCase()
-          if (todo?.status === "completed" && gate && !evidence.has(gate)) {
-            throw guardError(
-              `Doctor ${gate} was marked complete without matching successful tool output.`,
-              `Run the task:doctor:${gate} command and update the todo only after it succeeds.`,
-              `A TASK DOCTOR success line for ${gate}.`,
-            )
-          }
-        }
-      }
-
-      if (features.planningEnforcer) {
-        const newTask = isNewTodoWrite(root, paths)
-        if (newTask) {
-          const unfinished = todoTasks(root).find((name) => !taskRegistrationValid(root, name))
-          if (unfinished) throw guardError(
-            `kanban/todo/${unfinished} is not registered, so ${newTask} cannot be created yet.`,
-            `Run npm run task:doctor:lint -- kanban/todo/${unfinished}, fix findings, then run npm run task:doctor:register -- kanban/todo/${unfinished}.`,
-            `TASK DOCTOR: REGISTERED kanban/todo/${unfinished}`,
-          )
-        }
-      }
+      const lifecycleBlock = reduceWorkflow({ type: "lifecycle.tool", input: {
+        role: plannerMode ? "planner" : executorMode ? "executor" : workerMode ? "worker" : "unknown",
+        command: input.tool === "bash" ? command : "",
+        invocation,
+        activeTask: runningTask,
+        todoTaskPaths: taskPaths,
+        mutation,
+        targetPaths: paths,
+        taskMemoryAppend: features.taskMemoryAppend,
+        modeGuard: features.modeGuard,
+        contextCheckpoint: features.contextCheckpoint,
+        checkpointPending: pendingCompact.has(input.sessionID) && input.tool !== "record_guard_learning",
+        executorReview: features.executorReview,
+        doctorCommandMentioned: doctorCommandMention.test(command),
+        exactDoctorCommand: isDoctorCommand(command),
+      } }).value as { problem: string; action: string; success?: string } | null
+      if (lifecycleBlock) throw guardError(lifecycleBlock.problem, lifecycleBlock.action, lifecycleBlock.success)
 
       const planningWrite = plannerWrite || (paths.length > 0 && paths.every((path) => planningPath.test(path)))
       const lifecycleCommand = isDoctorCommand(command)
       const workerPortOperation = workerMode && input.tool === "bash" && workerPortCommand.test(command)
-      if (!features.taskStartGuard || !mutation || planningWrite || lifecycleCommand || workerPortOperation) {
+      const taskGuardExempt = planningWrite || lifecycleCommand || workerPortOperation
+      const taskScope = runningTask?.status === "started" ? scopeFromTask(root, runningTask.taskPath) : null
+      const mkdirPaths = input.tool === "bash"
+        ? (simpleMkdirTargets(command) ?? []).map((path) => normalize(root, path)).filter((path): path is string => path !== null)
+        : []
+      const outsideScopePath = taskScope
+        ? paths.find((path) => !allowed(path, taskScope.paths)
+          && !(mkdirPaths.includes(path) && allowedNewParentDirectory(path, taskScope.newPaths)))
+        : null
+      const newTask = features.planningEnforcer ? isNewTodoWrite(root, paths) : null
+      const unfinishedTaskName = newTask ? todoTasks(root).find((name) => !taskRegistrationValid(root, name)) : null
+      const operationBlock = reduceWorkflow({ type: "operation.tool", input: {
+        tool: input.tool,
+        internalFileGuard: features.internalFileGuard,
+        protectedTarget: !lifecycleCommand
+          ? paths.find((path) => isProtected(path, protectedPaths)) ?? protectedPaths.find((path) => command.includes(path))
+          : null,
+        readOnlyTarget: paths.find((path) => isProtected(path, readOnlyPaths)) ?? readOnlyPaths.find((path) => command.includes(path)),
+        activeTask: runningTask,
+        firstTodoTask: taskPaths[0],
+        todoDiscipline: features.todoDiscipline,
+        todos: Array.isArray(output.args?.todos) ? output.args.todos : [],
+        doctorEvidence: [...(doctorEvidence.get(input.sessionID) ?? [])],
+        planningEnforcer: features.planningEnforcer,
+        newTask,
+        unfinishedTask: unfinishedTaskName ? `kanban/todo/${unfinishedTaskName}` : null,
+        taskStartGuard: features.taskStartGuard,
+        mutation,
+        taskGuardExempt,
+        firstTaskRegistered: taskPaths[0] ? taskRegistrationValid(root, taskPaths[0].split("/").pop()!) : false,
+        outsideScopePath,
+        opaqueInlineWithoutPaths: opaqueInline && paths.length === 0,
+        pathlessShellMutation: input.tool === "bash" && mutation && paths.length === 0,
+        userPermissionEscalation: features.userPermissionEscalation,
+        transactionalWorkerChanges: features.transactionalWorkerChanges,
+      } }).value as { problem: string; action: string; success?: string } | null
+      if (operationBlock) throw guardError(operationBlock.problem, operationBlock.action, operationBlock.success)
+
+      if (!features.taskStartGuard || !mutation || taskGuardExempt) {
         if (automaticRequiredTaskRead) {
           pendingAutomaticWorkerTaskReads.set(input.sessionID, automaticRequiredTaskRead)
           await log("info", "Staged an exact automatic Worker task read for the reviewed first target", {
@@ -10106,47 +9900,6 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
           })
         }
         return
-      }
-
-      const state = activeState(root)
-      if (state?.status !== "started") {
-        const name = todoTasks(root)[0]
-        const task = name ? `kanban/todo/${name}` : "kanban/todo/<task>.md"
-        const registered = name ? taskRegistrationValid(root, name) : false
-        const action = registered
-          ? `Run npm run task:doctor:start -- ${task}.`
-          : `Run npm run task:doctor:lint -- ${task}, then npm run task:doctor:register -- ${task}, then npm run task:doctor:start -- ${task}.`
-        throw guardError("Implementation was attempted before the current task was started.", action, `TASK DOCTOR: STARTED ${task}`)
-      }
-      const taskScope = scopeFromTask(root, state.taskPath)
-      const mkdirPaths = input.tool === "bash"
-        ? (simpleMkdirTargets(command) ?? []).map((path) => normalize(root, path)).filter((path): path is string => path !== null)
-        : []
-      for (const path of paths) {
-        if (!allowed(path, taskScope.paths) && !(mkdirPaths.includes(path) && allowedNewParentDirectory(path, taskScope.newPaths))) throw guardError(
-          `${path} is outside the active task Scope.`,
-          "Do not edit it. Stop and report that the task Scope is insufficient; task Scope cannot change after start.",
-        )
-      }
-      if (opaqueInline && paths.length === 0) {
-        throw guardError(
-          "An inline interpreter command is opaque and may read or mutate paths outside the active task Scope.",
-          features.userPermissionEscalation && !features.transactionalWorkerChanges
-            ? "Use request_command_permission. Explain what the command will do and why, provide the complete command, and declare every affected project-relative path. The user must approve it before execution."
-            : features.transactionalWorkerChanges
-              ? "Use read or grep for inspection. Use preview_worker_changes and apply_worker_changes for exact scoped file changes. Arbitrary scripts and interpreters are not supported."
-              : "Use read or grep for inspection. Use write or edit for an exact scoped file. For executable project logic, add a regular script file to the task Scope and run that file instead of inline code.",
-        )
-      }
-      if (input.tool === "bash" && mutation && paths.length === 0) {
-        throw guardError(
-          "The mutating shell command has no target path the guard can verify.",
-          features.userPermissionEscalation && !features.transactionalWorkerChanges
-            ? "Use write for ordinary files; OpenCode write creates missing parent directories. If the shell command is necessary, use request_command_permission with a clear purpose, the complete command, and every affected project-relative path."
-            : features.transactionalWorkerChanges
-              ? "Use preview_worker_changes and apply_worker_changes for exact scoped file changes. Arbitrary mutating shell commands are not supported."
-              : "Create the exact scoped file with the write tool. OpenCode write creates missing parent directories automatically; do not run mkdir first.",
-        )
       }
       })
       } finally {
@@ -10577,16 +10330,18 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       if (features.workerHelp && modeSettings.workerAgents.has(agent) && failed && failedDoctor?.gate === "verify") {
         const fingerprint = doctorFailureFingerprint(failedDoctor.gate, failedDoctor.taskPath, output.output)
         if (fingerprint) {
-          const failures = doctorFailures.get(input.sessionID)
-            ?? new Map<string, { count: number; lastAt: number; fingerprint: LoopFailureFingerprint }>()
-          const previous = failures.get(fingerprint.signature)
-          const now = Date.now()
-          const count = previous && now - previous.lastAt <= 10 * 60_000 ? previous.count + 1 : 1
-          failures.set(fingerprint.signature, { count, lastAt: now, fingerprint })
-          doctorFailures.set(input.sessionID, failures)
           const slowFailure = doctorElapsedMs >= longDoctorFailureMs
-          if (count >= doctorFailureThreshold || slowFailure) {
-            const required = { count, fingerprint, reason: slowFailure ? "slow" as const : "repeated" as const }
+          const window = recordFailure({
+            history: doctorFailures.get(input.sessionID),
+            fingerprint,
+            now: Date.now(),
+            windowMs: 10 * 60_000,
+            threshold: doctorFailureThreshold,
+            slow: slowFailure,
+          })
+          doctorFailures.set(input.sessionID, window.history)
+          if (window.terminal) {
+            const required = { count: window.count, fingerprint, reason: window.reason! }
             workerHelpRequired.set(input.sessionID, required)
             const state = activeState(root)
             const pendingLearnings = pendingGuardLearningsForAgent(input.sessionID)
@@ -10604,13 +10359,13 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
                 ].join("\n")
               : [
                   "MODEL LOOP STOP",
-                  `${count} equivalent Doctor failures occurred for ${failedDoctor.taskPath} at ${failedDoctor.gate}.`,
+                  `${window.count} equivalent Doctor failures occurred for ${failedDoctor.taskPath} at ${failedDoctor.gate}.`,
                   `Latest problem: ${fingerprint.problem}`,
                   "Record any pending Guard learning, then call request_executor_help and stop.",
                 ].join("\n"))
             await log("warn", "Requiring Worker help after unsafe Doctor failure", {
               sessionID: input.sessionID,
-              count,
+              count: window.count,
               threshold: doctorFailureThreshold,
               elapsedMs: doctorElapsedMs,
               longFailureThresholdMs: longDoctorFailureMs,
@@ -10657,14 +10412,12 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       }
       if (!failed && successfulDoctor) {
         sessionFeedback.delete(input.sessionID)
-        const failures = doctorFailures.get(input.sessionID)
-        if (failures) {
-          for (const [signature, failure] of failures) {
-            if (failure.fingerprint.tool === `task:doctor:${successfulDoctor.gate}`
-              && failure.fingerprint.target === successfulDoctor.taskPath) failures.delete(signature)
-          }
-          if (failures.size === 0) doctorFailures.delete(input.sessionID)
-        }
+        const remainingFailures = clearFailures(doctorFailures.get(input.sessionID), (fingerprint) => (
+          fingerprint.tool === `task:doctor:${successfulDoctor.gate}`
+            && fingerprint.target === successfulDoctor.taskPath
+        ))
+        if (remainingFailures.size === 0) doctorFailures.delete(input.sessionID)
+        else doctorFailures.set(input.sessionID, remainingFailures)
       }
 
       const completed = successfulDoctor?.gate === "complete"
@@ -10837,26 +10590,28 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
         }
         const fingerprint = loopFailureFingerprint(part.tool, part.state.input ?? {}, String(part.state.error ?? ""))
         if (!fingerprint) return
-        const now = Date.now()
-        const failures = loopFailures.get(sessionID) ?? new Map<string, { count: number; lastAt: number; fingerprint: LoopFailureFingerprint }>()
-        const previous = failures.get(fingerprint.signature)
-        const count = previous && now - previous.lastAt <= 10 * 60_000 ? previous.count + 1 : 1
-        failures.set(fingerprint.signature, { count, lastAt: now, fingerprint })
-        loopFailures.set(sessionID, failures)
-        if (count >= workerHelpFailureThreshold) {
-          workerHelpRequired.set(sessionID, { count, fingerprint })
-          const persistedHelp = await terminalizeRepeatedWorkerFailure(sessionID, count, fingerprint)
+        const window = recordFailure({
+          history: loopFailures.get(sessionID),
+          fingerprint,
+          now: Date.now(),
+          windowMs: 10 * 60_000,
+          threshold: workerHelpFailureThreshold,
+        })
+        loopFailures.set(sessionID, window.history)
+        if (window.terminal) {
+          workerHelpRequired.set(sessionID, { count: window.count, fingerprint })
+          const persistedHelp = await terminalizeRepeatedWorkerFailure(sessionID, window.count, fingerprint)
           if (!persistedHelp) {
             sessionFeedback.set(sessionID, [
               "MODEL LOOP STOP",
-              `${count} semantically equivalent failures occurred for ${fingerprint.tool} on ${fingerprint.target}.`,
+              `${window.count} semantically equivalent failures occurred for ${fingerprint.tool} on ${fingerprint.target}.`,
               `Failure category: ${fingerprint.category}`,
               "Record pending Guard learnings, then call request_executor_help and end this Worker run.",
             ].join("\n"))
           }
           await log("warn", "Requiring Worker help after repeated semantic tool failures", {
             sessionID,
-            count,
+            count: window.count,
             threshold: workerHelpFailureThreshold,
             tool: fingerprint.tool,
             target: fingerprint.target,
@@ -10882,38 +10637,11 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
         for (const [taskPath, workerSessionIDs] of [...reviewableWorkerSessions]) {
           if (workerSessionIDs.has(sessionID)) forgetReviewableWorker(taskPath, sessionID)
         }
-        pendingReviewedWorkerRetries.delete(sessionID)
-        subagentParents.delete(sessionID)
-        sessionTodos.delete(sessionID)
-        idlePromptedFor.delete(sessionID)
-        sessionAgents.delete(sessionID)
-        sessionModels.delete(sessionID)
-        sessionIdentityHydrations.delete(sessionID)
-        pendingGuardLearnings.delete(sessionID)
-        guardLearningPromptedFor.delete(sessionID)
-        guardLearningResumePending.delete(sessionID)
-        plannerCompletionCorrections.delete(sessionID)
-        plannerEmptyStopRecoveries.delete(sessionID)
-        workerRuleReads.delete(sessionID)
-        workerTaskReads.delete(sessionID)
-        workerFileReads.delete(sessionID)
-        pendingAutomaticWorkerTaskReads.delete(sessionID)
-        workerDoctorPreflights.delete(sessionID)
-        workerFindingTargets.delete(sessionID)
-        workerFindingReads.delete(sessionID)
-        workerVerifyRequired.delete(sessionID)
-        workerMechanicalDoctorNotices.delete(sessionID)
-        executorReviewReads.delete(sessionID)
-        executorHelpReReviewRequested.delete(sessionID)
-        executorPlannerRecoveryRequested.delete(sessionID)
-        malformedWorkflowToolRetries.delete(sessionID)
-        loopFailures.delete(sessionID)
-        doctorFailures.delete(sessionID)
-        workerHelpRequired.delete(sessionID)
-        workerDoctorStartedAt.delete(sessionID)
-        workerHelpTerminalSessions.delete(sessionID)
         clearWorkerHarnessRecoveryTerminal(sessionID)
-        observedTerminalToolParts.delete(sessionID)
+        await executeWorkflowEffects(
+          reduceWorkflow({ type: "session.deleted", sessionID }).effects,
+          { clearSession: (id) => runtimeState.deleteSession(id) },
+        )
         return
       }
 
