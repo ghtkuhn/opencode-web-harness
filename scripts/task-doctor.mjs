@@ -1310,7 +1310,7 @@ function verify(taskPath) {
     const missingNewPaths = task.allowedScopeEntries
         .filter((entry) => entry.isNew && !existsSync(resolve(root, entry.path)))
         .map((entry) => `NEW_SCOPE_PATH_MISSING: ${entry.path}; create the declared path before PASS`);
-    postErrors.push(...missingNewPaths);
+    if (!preflightOnly) postErrors.push(...missingNewPaths);
     if (gitMode && state.indexHash !== indexHash()) postErrors.push('GIT_INDEX_CHANGED: verification staged files');
     if (postErrors.length > 0) fail(postErrors);
 
@@ -1446,7 +1446,7 @@ function selfTest() {
         [relevantChangedPaths({ 'WORKER.md': 'a' }, { 'WORKER.md': 'b' }, [{ path: 'WORKER.md', beforeHash: 'a', afterHash: 'b', violationID: 'abcdef123456' }]).length === 0, 'authorized WORKER change is ignored'],
         [relevantChangedPaths({ 'MEMORY.md': 'a' }, { 'MEMORY.md': 'b' }, [{ path: 'MEMORY.md', beforeHash: 'a', afterHash: 'b', recoveryID: 'M1' }]).length === 0, 'authorized MEMORY change is ignored'],
         [relevantChangedPaths({ 'AGENTS.md': 'a' }, { 'AGENTS.md': 'b' }, [{ path: 'AGENTS.md', beforeHash: 'a', afterHash: 'b', recoveryID: 'H1' }]).length === 0, 'authorized Harness change is ignored'],
-        [recoveryPatternMatches('WORKER-GEMMA4.md', 'WORKER-*.md'), 'Harness wildcard path matching'],
+        [recoveryPatternMatches('WORKER-LOCAL.md', 'WORKER-*.md'), 'Harness wildcard path matching'],
         [matchesExecutorRecoveryPath('AGENTS.md'), 'default Harness rule paths use Executor recovery'],
         [recoveryPatternMatches('scripts/task-doctor.mjs', 'scripts'), 'Harness directory path matching'],
         [taskRelevantChangedPaths({ 'MEMORY.md': 'a', 'src/a.ts': 'a' }, { 'MEMORY.md': 'b', 'src/a.ts': 'b' }, { memoryAction: 'none' }).join(',') === 'src/a.ts', 'unrelated MEMORY change is excluded from Worker files'],

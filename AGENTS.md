@@ -6,8 +6,7 @@
 
 # Context
 
-* Read `MEMORY.md` and `project.json` before project work.
-* Planner reads `CUSTOM.md`; Worker reads `WORKER.md` and each Guard-named model-family file.
+* Planner reads `MEMORY.md`, `project.json`, and `CUSTOM.md`; Worker reads `WORKER.md`.
 * Do not modify implementation files without an explicit implementation request.
 * Preserve unrelated existing changes in a dirty worktree.
 

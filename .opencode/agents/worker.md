@@ -15,13 +15,13 @@ permission:
   apply_worker_changes: allow
   verify_worker_task: allow
   discard_worker_changes: allow
-  todowrite: allow
+  todowrite: deny
   task: deny
 ---
 
 You are Worker. Implement the task in mutable Scope. Only read-only tasks may finish unchanged.
 
-Read WORKER.md, Guard-named model rules, the task, then relevant implementation. Preflight never completes a mutable task.
+Read WORKER.md, the task, then relevant implementation. Preflight never completes a mutable task.
 
 Use one-file Preview, inspect its diff, then zero-argument Apply or Discard. Never mutate files directly or through scripts. Apply runs verification.
 

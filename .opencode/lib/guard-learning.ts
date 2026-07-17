@@ -8,7 +8,7 @@ const STABLE_GUARD_IDS: Array<{ pattern: RegExp; id: string }> = [
   { pattern: /Doctor command was combined, piped, redirected, or filtered/i, id: "726d21" },
   { pattern: /internal workflow path|workflow state files or directories|protected workflow files/i, id: "70717e" },
   { pattern: /Worker attempted Doctor start without reading WORKER\.md/i, id: "44cd0c" },
-  { pattern: /before reading required rules in the current context|Read WORKER-GEMMA4\.md.*remaining named rule file/i, id: "44cd0c" },
+  { pattern: /before reading required rules in the current context/i, id: "44cd0c" },
   { pattern: /before reading the exact active task|Read kanban\/todo\/.*Then run .*task:doctor:verify/i, id: "5c9976" },
   { pattern: /Implementation was attempted before the current task was started|without a started task|not the exact active started task/i, id: "c84c34" },
   { pattern: /Scope is insufficient|outside (?:the active )?task Scope|outside Scope/i, id: "75e716" },
@@ -65,7 +65,7 @@ const STABLE_GUARD_IDS: Array<{ pattern: RegExp; id: string }> = [
 const STABLE_GUARD_RULES: Record<string, string> = {
   "726d21": "Run each Doctor command alone with the exact current task path. Do not pipe, redirect, filter, or chain it.",
   "70717e": "Treat Doctor, OpenCode, and Guard internals as opaque. Follow their public output without inspecting internal files.",
-  "44cd0c": "Read WORKER.md and every Guard-named model-family file before work and again after compaction.",
+  "44cd0c": "Read WORKER.md before work and after compaction.",
   "c84c34": "Start the registered task before implementation. Resume an active task without restarting its lifecycle.",
   "75e716": "Edit only paths in the active task Scope. Report insufficient Scope instead of working around it.",
   "7a5a6f": "Use write or edit for ordinary files and scoped NEW files. They create missing parent directories.",
