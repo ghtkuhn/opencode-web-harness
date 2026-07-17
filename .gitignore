@@ -3,6 +3,10 @@ node_modules/
 .task-doctor/
 .runtime/
 
+# Harness development-only tests
+.opencode/tests/
+scripts/*.test.mjs
+
 # Build outputs
 dist/
 build/

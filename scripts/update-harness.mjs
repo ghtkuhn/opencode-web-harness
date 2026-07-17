@@ -152,13 +152,17 @@ async function fetchBuffer(fetchImpl, url, { accept, maxBytes, allowNotFound = f
   return buffer
 }
 
-function mergePackageScripts(root, manifest, writes) {
+function mergePackageScripts(root, localManifest, remoteManifest, writes) {
   const relativePath = "package.json"
   const path = resolve(root, relativePath)
   assertNoSymlink(root, relativePath)
   const original = existsSync(path) ? readFileSync(path, "utf8") : "{}\n"
   const value = parseJson(original, relativePath)
-  value.scripts = { ...(value.scripts ?? {}), ...manifest.packageScripts }
+  const scripts = { ...(value.scripts ?? {}) }
+  for (const [name, command] of Object.entries(localManifest.packageScripts)) {
+    if (!(name in remoteManifest.packageScripts) && scripts[name] === command) delete scripts[name]
+  }
+  value.scripts = { ...scripts, ...remoteManifest.packageScripts }
   writes.set(relativePath, formatJson(value, original))
 }
 
@@ -323,7 +327,7 @@ export async function runHarnessUpdate(options = {}) {
     writes.set(relativePath, content)
   }
 
-  mergePackageScripts(root, remoteManifest, writes)
+  mergePackageScripts(root, localManifest, remoteManifest, writes)
   mergeProjectConfig(root, remoteManifest, repository, writes)
 
   const removals = compatibilityMode

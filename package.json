@@ -10,7 +10,6 @@
     "app:clear-ports": "node scripts/app-control.mjs clear-ports",
     "harness:update": "node scripts/update-harness.mjs",
     "harness:update:check": "node scripts/update-harness.mjs --check",
-    "harness:update:test": "node --test scripts/update-harness.test.mjs",
     "task:doctor:start": "node scripts/task-doctor.mjs start",
     "task:doctor:verify": "node scripts/task-doctor.mjs verify",
     "task:doctor:complete": "node scripts/task-doctor.mjs complete",

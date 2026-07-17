@@ -169,7 +169,9 @@ Apply the latest release with:
 npm run harness:update
 ```
 
-`harness-manifest.json` limits updates to Harness-owned files such as `AGENTS.md`, `kanban/TASK.md`, Task Doctor, application control, OpenCode roles, plugins, libraries, and their tests. Application code, `project.json`, `README.md`, `MEMORY.md`, `CUSTOM.md`, `WORKER.md`, and Kanban task history are not replaced. Reserved Harness scripts and protected paths are merged into `package.json` and `project.json` without removing project-specific entries.
+`harness-manifest.json` limits updates to Harness-owned runtime files such as `AGENTS.md`, `kanban/TASK.md`, Task Doctor, application control, OpenCode roles, plugins, and libraries. Application code, `project.json`, `README.md`, `MEMORY.md`, `CUSTOM.md`, `WORKER.md`, and Kanban task history are not replaced. Reserved Harness scripts and protected paths are merged into `package.json` and `project.json` without removing project-specific entries.
+
+The release manifest and repository contain only files needed to install, configure, document, update, and run the Harness. Development-only Harness test suites are intentionally ignored.
 
 The updater runs only through the explicit CLI command; ordinary requests containing the word “template” are not intercepted. It downloads and validates the complete release before changing files. Changed files are backed up under `.runtime/harness-update-backups`, writes are atomic, and changed Harness-local dependencies are installed automatically. A failed write or dependency installation restores the managed files and previous dependency set. The applied release is recorded in `.runtime/harness-update.json`. Restart OpenCode after a successful update so that new agent sessions load the updated plugins and role definitions.
 

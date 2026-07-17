@@ -485,7 +485,13 @@ function parseTask(taskPath, requireTodo = true) {
     if (!memoryReason || memoryReason.includes('<')) fail(['TASK_FORMAT: Memory needs a concrete one-line Reason']);
     for (const entry of allowedScopeEntries) {
         const absoluteScopePath = resolve(root, entry.path);
-        if (!entry.isNew && !existsSync(absoluteScopePath)) fail([`SCOPE_PATH_MISSING: ${entry.path}; correct the path or mark it as NEW`]);
+        if (
+            !entry.isNew
+            && !existsSync(absoluteScopePath)
+            && !scopePathExistedAtActiveTaskStart(entry.path, relativePath, hash(content))
+        ) {
+            fail([`SCOPE_PATH_MISSING: ${entry.path}; correct the path or mark it as NEW`]);
+        }
     }
     if (memoryAction !== 'none' && !allowedScope.includes('MEMORY.md')) {
         fail([`TASK_FORMAT: Memory action ${memoryAction} requires MEMORY.md in Allowed scope`]);
@@ -553,6 +559,21 @@ function taskRegistrationValid(task) {
     try {
         const registration = JSON.parse(readFileSync(registrationPath(task), 'utf8'));
         return registration.status === 'registered' && registration.taskHash === task.contentHash;
+    } catch {
+        return false;
+    }
+}
+
+function scopePathExistedAtActiveTaskStart(path, taskPath, taskHash) {
+    if (!existsSync(statePath)) return false;
+    try {
+        const state = JSON.parse(readFileSync(statePath, 'utf8'));
+        if (!['started', 'passed'].includes(state.status)) return false;
+        if (state.taskPath !== taskPath || state.taskHash !== taskHash) return false;
+        if (matchesFilesystemIgnore(path)) return true;
+        return Object.keys(state.snapshot ?? {}).some((snapshotPath) => (
+            snapshotPath === path || snapshotPath.startsWith(`${path}/`)
+        ));
     } catch {
         return false;
     }

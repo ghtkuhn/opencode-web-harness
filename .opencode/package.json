@@ -2,11 +2,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@opencode-ai/plugin": "1.17.20"
-  },
-  "devDependencies": {
-    "@types/node": "^26.1.1",
-    "tsx": "^4.23.0",
+    "@opencode-ai/plugin": "1.17.20",
     "typescript": "^6.0.3"
   }
 }
