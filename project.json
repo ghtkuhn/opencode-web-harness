@@ -83,7 +83,6 @@
                 "opencode.json"
             ],
             "readOnlyAgentPaths": [
-                "kanban/TASK.md",
                 "CUSTOM.md",
                 "WORKER.md"
             ]

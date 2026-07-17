@@ -549,7 +549,7 @@ function readableToolCallDescription(toolName: string, args: Record<string, unkn
 }
 
 function doctorProject(root: string) {
-  return existsSync(resolve(root, "scripts/task-doctor.mjs")) && existsSync(resolve(root, "kanban/TASK.md"))
+  return existsSync(resolve(root, "scripts/task-doctor.mjs"))
 }
 
 function run(root: string, command: string, args: string[] = []) {

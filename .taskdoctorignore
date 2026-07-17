@@ -3,7 +3,6 @@
 .taskdoctorignore
 .opencode/
 scripts/task-doctor.mjs
-kanban/TASK.md
 .git/
 node_modules/
 

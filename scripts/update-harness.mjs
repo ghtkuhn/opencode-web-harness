@@ -19,8 +19,16 @@ const DEFAULT_REPOSITORY = "ghtkuhn/opencode-web-harness"
 const MAX_MANIFEST_BYTES = 256 * 1024
 const MAX_FILE_BYTES = 2 * 1024 * 1024
 const MAX_TOTAL_BYTES = 12 * 1024 * 1024
-const exactManagedPaths = new Set(["AGENTS.md", "kanban/TASK.md", MANIFEST_PATH])
+const exactManagedPaths = new Set(["AGENTS.md", MANIFEST_PATH])
+const legacyManagedPaths = new Set(["kanban/TASK.md"])
 const managedPrefixes = ["scripts/", ".opencode/"]
+const runtimeGitignoreRules = [
+  ".task-doctor/",
+  ".runtime/",
+  "kanban/todo/",
+  "kanban/done/",
+  "kanban/superseded/",
+]
 
 function parseJson(text, label) {
   try {
@@ -50,7 +58,7 @@ function assertRepository(value) {
   return value
 }
 
-function assertManagedPath(path) {
+function assertManagedPath(path, allowLegacy = false) {
   if (typeof path !== "string" || !path || isAbsolute(path) || path.includes("\\")) {
     throw new Error(`Invalid managed harness path: ${String(path)}.`)
   }
@@ -61,13 +69,15 @@ function assertManagedPath(path) {
   if (path === ".git" || path.startsWith(".git/") || path.includes("/node_modules/")) {
     throw new Error(`Managed harness path is forbidden: ${path}.`)
   }
-  if (!exactManagedPaths.has(path) && !managedPrefixes.some((prefix) => path.startsWith(prefix))) {
+  if (!exactManagedPaths.has(path)
+    && !(allowLegacy && legacyManagedPaths.has(path))
+    && !managedPrefixes.some((prefix) => path.startsWith(prefix))) {
     throw new Error(`Managed harness path is outside the allowed harness surface: ${path}.`)
   }
   return path
 }
 
-function validateManifest(value, label) {
+function validateManifest(value, label, allowLegacy = false) {
   if (!value || typeof value !== "object" || Array.isArray(value) || value.schemaVersion !== 1) {
     throw new Error(`${label} must use harness manifest schemaVersion 1.`)
   }
@@ -75,7 +85,7 @@ function validateManifest(value, label) {
   if (!Array.isArray(value.files) || value.files.length === 0) {
     throw new Error(`${label} must declare at least one managed file.`)
   }
-  const files = [...new Set(value.files.map(assertManagedPath))]
+  const files = [...new Set(value.files.map((path) => assertManagedPath(path, allowLegacy)))]
   const packageScripts = value.packageScripts ?? {}
   if (!packageScripts || typeof packageScripts !== "object" || Array.isArray(packageScripts)
     || Object.entries(packageScripts).some(([name, command]) => !name || typeof command !== "string" || !command.trim())) {
@@ -195,6 +205,20 @@ function mergeProjectConfig(root, manifest, repository, writes) {
   writes.set(relativePath, formatJson(value, original))
 }
 
+function mergeRuntimeGitignore(root, writes) {
+  const relativePath = ".gitignore"
+  const path = resolve(root, relativePath)
+  assertNoSymlink(root, relativePath)
+  const original = existsSync(path) ? readFileSync(path, "utf8") : ""
+  const present = new Set(original.split(/\r?\n/).map((line) => line.trim()))
+  const missing = runtimeGitignoreRules.filter((rule) => !present.has(rule))
+  if (missing.length === 0) return
+  const prefix = original.length === 0
+    ? ""
+    : `${original.endsWith("\n") ? original : `${original}\n`}\n`
+  writes.set(relativePath, Buffer.from(`${prefix}# OpenCode Harness runtime\n${missing.join("\n")}\n`))
+}
+
 function dependencyInstallRequest(root) {
   return {
     command: process.platform === "win32" ? "npm.cmd" : "npm",
@@ -272,7 +296,7 @@ export async function runHarnessUpdate(options = {}) {
   const check = options.check === true
   const localManifestPath = resolve(root, MANIFEST_PATH)
   const localManifestText = readFileSync(localManifestPath, "utf8")
-  const localManifest = validateManifest(parseJson(localManifestText, "Local harness manifest"), "Local harness manifest")
+  const localManifest = validateManifest(parseJson(localManifestText, "Local harness manifest"), "Local harness manifest", true)
   const project = readJson(resolve(root, "project.json"), "project.json")
   const repository = assertRepository(
     options.repository
@@ -329,6 +353,7 @@ export async function runHarnessUpdate(options = {}) {
 
   mergePackageScripts(root, localManifest, remoteManifest, writes)
   mergeProjectConfig(root, remoteManifest, repository, writes)
+  mergeRuntimeGitignore(root, writes)
 
   const removals = compatibilityMode
     ? []

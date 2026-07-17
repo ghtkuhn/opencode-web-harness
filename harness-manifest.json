@@ -4,7 +4,6 @@
   "files": [
     "harness-manifest.json",
     "AGENTS.md",
-    "kanban/TASK.md",
     "scripts/app-control.mjs",
     "scripts/task-doctor.mjs",
     "scripts/update-harness.mjs",

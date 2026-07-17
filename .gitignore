@@ -22,12 +22,9 @@ playwright/.auth/
 .playwright/
 
 # Local Kanban tasks
-kanban/todo/*
-!kanban/todo/.gitkeep
-kanban/done/*
-!kanban/done/.gitkeep
-kanban/superseded/*
-!kanban/superseded/.gitkeep
+kanban/todo/
+kanban/done/
+kanban/superseded/
 
 # Logs
 *.log

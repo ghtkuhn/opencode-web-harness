@@ -169,7 +169,7 @@ Apply the latest release with:
 npm run harness:update
 ```
 
-`harness-manifest.json` limits updates to Harness-owned runtime files such as `AGENTS.md`, `kanban/TASK.md`, Task Doctor, application control, OpenCode roles, plugins, and libraries. Application code, `project.json`, `README.md`, `MEMORY.md`, `CUSTOM.md`, `WORKER.md`, and Kanban task history are not replaced. Reserved Harness scripts and protected paths are merged into `package.json` and `project.json` without removing project-specific entries.
+`harness-manifest.json` limits updates to Harness-owned runtime files such as `AGENTS.md`, Task Doctor, application control, OpenCode roles, plugins, and libraries. Application code, `project.json`, `README.md`, `MEMORY.md`, `CUSTOM.md`, `WORKER.md`, and Kanban task history are not replaced. Reserved Harness scripts and protected paths are merged into `package.json` and `project.json` without removing project-specific entries. Runtime Kanban directories are created locally and added to the target project's `.gitignore`.
 
 The release manifest and repository contain only files needed to install, configure, document, update, and run the Harness. Development-only Harness test suites are intentionally ignored.
 
@@ -243,7 +243,7 @@ npm run test:e2e
 
 ## Local Runtime Data
 
-`.task-doctor`, `.runtime`, Playwright reports, and Kanban files in `kanban/todo`, `kanban/done`, and `kanban/superseded` are local runtime data and are not versioned. The `.gitkeep` files preserve the empty Kanban directories in the repository. To commit task history intentionally, adjust the corresponding rules in `.gitignore`.
+`.task-doctor`, `.runtime`, Playwright reports, and every file under `kanban/todo`, `kanban/done`, and `kanban/superseded` are local runtime data and are not versioned or released. Task Doctor creates the runtime directories when needed. The updater adds their ignore rules without replacing other project-specific `.gitignore` entries.
 
 ## Project Structure
 
@@ -252,9 +252,8 @@ npm run test:e2e
 | `code/backend` | Backend application and backend tests |
 | `code/frontend` | Frontend application and browser E2E tests |
 | `code/database` | Local persistent data |
-| `kanban/TASK.md` | Minimal model-facing task contract |
-| `kanban/todo` | Tasks that can be registered or are active |
-| `kanban/done` | Tasks completed by the workflow |
+| `kanban/todo` | Ignored local tasks that can be registered or are active |
+| `kanban/done` | Ignored local tasks completed by the workflow |
 | `scripts/task-doctor.mjs` | Task lifecycle and verification |
 | `scripts/app-control.mjs` | Application start, stop, and port management |
 | `scripts/update-harness.mjs` | Git-free release updater for managed Harness files |

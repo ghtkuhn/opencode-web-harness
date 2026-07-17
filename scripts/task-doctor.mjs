@@ -12,6 +12,7 @@ const statePath = resolve(dataDirectory, 'state.json');
 const reportsDirectory = resolve(dataDirectory, 'reports');
 const lintsDirectory = resolve(dataDirectory, 'lints');
 const registrationsDirectory = resolve(dataDirectory, 'registrations');
+const kanbanDirectories = ['todo', 'done', 'superseded'].map((name) => resolve(root, 'kanban', name));
 const ignorePath = resolve(root, '.taskdoctorignore');
 const memoryPath = resolve(root, 'MEMORY.md');
 const projectConfigPath = resolve(root, 'project.json');
@@ -36,6 +37,8 @@ const verifyStateConfig = readVerifyStateConfig();
 const workerPoolSettings = readWorkerPoolSettings();
 const executorBaselineRecoveryEnabled = readExecutorBaselineRecoveryEnabled();
 const executorRecoveryPatterns = readExecutorRecoveryPatterns();
+
+for (const directory of kanbanDirectories) mkdirSync(directory, { recursive: true });
 
 function parseVerifyCommands(verifyBlock) {
     return verifyBlock.split(/\r?\n/).flatMap((line) => {
