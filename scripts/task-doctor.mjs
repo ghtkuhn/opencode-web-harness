@@ -584,16 +584,45 @@ function scopePathExistedAtActiveTaskStart(path, taskPath, taskHash) {
 function registeredPeerTaskChange(path, activeTaskPath) {
     if (path === activeTaskPath) return false;
     const match = path.match(/^kanban\/(?:todo|done)\/([^/]+\.md)$/);
-    if (!match) return false;
-    const candidates = [`kanban/todo/${match[1]}`, `kanban/done/${match[1]}`]
-        .filter((candidate) => existsSync(resolve(root, candidate)));
-    if (candidates.length !== 1) return false;
-    const absolutePath = resolve(root, candidates[0]);
-    const task = {
-        name: match[1],
-        contentHash: fileHash(absolutePath),
-    };
-    return taskRegistrationValid(task);
+    if (match) {
+        const candidates = [`kanban/todo/${match[1]}`, `kanban/done/${match[1]}`]
+            .filter((candidate) => existsSync(resolve(root, candidate)));
+        if (candidates.length === 1) {
+            const absolutePath = resolve(root, candidates[0]);
+            const task = {
+                name: match[1],
+                contentHash: fileHash(absolutePath),
+            };
+            if (taskRegistrationValid(task)) return true;
+        }
+    }
+
+    if (!existsSync(reportsDirectory)) return false;
+    let currentHash = null;
+    if (existsSync(resolve(root, path))) {
+        try {
+            const stats = lstatSync(resolve(root, path));
+            if (!stats.isFile() || stats.isSymbolicLink()) return false;
+            currentHash = fileHash(resolve(root, path));
+        } catch {
+            return false;
+        }
+    }
+    for (const reportName of readdirSync(reportsDirectory).filter((name) => name.endsWith('.json'))) {
+        try {
+            const report = JSON.parse(readFileSync(resolve(reportsDirectory, reportName), 'utf8'));
+            if (report?.status !== 'passed' || !/^kanban\/todo\/[^/]+\.md$/.test(report?.taskPath)) continue;
+            if (report.taskPath === activeTaskPath || !Object.hasOwn(report?.changedFileHashes ?? {}, path)) continue;
+            if (report.changedFileHashes[path] !== currentHash) continue;
+            const name = report.taskPath.split('/').pop();
+            const donePath = resolve(root, 'kanban/done', name);
+            if (!existsSync(donePath)) continue;
+            if (taskRegistrationValid({ name, contentHash: fileHash(donePath) })) return true;
+        } catch {
+            // Invalid or stale reports never authorize pre-start drift.
+        }
+    }
+    return false;
 }
 
 function hasTechnicalOperationEvidence(report) {
@@ -1306,6 +1335,7 @@ function verify(taskPath) {
         taskPath: task.relativePath,
         head: state.head,
         changedFiles,
+        changedFileHashes: Object.fromEntries(changedFiles.map((path) => [path, verifiedSnapshot[path] ?? null])),
         executorRecovery,
         whitelistedFiles: state.whitelistedFiles ?? [],
         testFiles: state.testFiles ?? [],
