@@ -1,0 +1,56 @@
+# Dependencies
+node_modules/
+.task-doctor/
+.runtime/
+
+# Build outputs
+dist/
+build/
+.vite/
+coverage/
+
+# Playwright outputs
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+playwright/.auth/
+.playwright/
+
+# Local Kanban tasks
+kanban/todo/*
+!kanban/todo/.gitkeep
+kanban/done/*
+!kanban/done/.gitkeep
+kanban/superseded/*
+!kanban/superseded/.gitkeep
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# SQLite/database runtime files
+code/database/*.db
+code/database/*.sqlite
+code/database/*.sqlite3
+code/database/*.db-*
+code/database/*.sqlite-*
+code/database/*.sqlite3-*
+
+# TypeScript / tooling caches
+*.tsbuildinfo
+.eslintcache
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

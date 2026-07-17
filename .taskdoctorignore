@@ -1,0 +1,30 @@
+# Doctor runtime and dependencies
+.task-doctor/
+.taskdoctorignore
+.opencode/
+scripts/task-doctor.mjs
+kanban/TASK.md
+.git/
+node_modules/
+
+# Generated output
+dist/
+code/frontend/dev-dist/
+build/
+coverage/
+.vite/
+test-results/
+.fallow/
+
+# Local and secret files
+.env
+.env.*
+*.log
+*.tsbuildinfo
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+*.db-journal
+.DS_Store

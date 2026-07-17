@@ -1,0 +1,92 @@
+{
+    "name": "App",
+    "settings": {
+        "maxMemorySize": "15kb",
+        "harnessUpdate": {
+            "repository": "ghtkuhn/opencode-web-harness"
+        },
+        "taskDoctor": {
+            "verifyState": true
+        },
+        "verifyState": [],
+        "appRuntime": {
+            "backendPort": 3001,
+            "frontendPort": 5173
+        },
+        "opencode": {
+            "agentModels": {},
+            "modelDrivers": {
+                "ornith": {
+                    "enabled": true,
+                    "structuredState": true,
+                    "enforceNextStep": true,
+                    "automaticLearning": true,
+                    "terminalViolationLimit": 2
+                }
+            },
+            "workerPool": {
+                "maxConcurrentWorkers": 1
+            },
+            "workerHelp": {
+                "failureThreshold": 3
+            },
+            "taskCompactionThresholdPercent": 70,
+            "workflowGuard": {
+                "modeGuard": true,
+                "taskStartGuard": true,
+                "planningEnforcer": true,
+                "plannerCompletionGuard": true,
+                "taskMemoryAppend": true,
+                "completionAuditor": true,
+                "failureFeedback": true,
+                "repetitionDetector": true,
+                "contextCheckpoint": true,
+                "idleReview": true,
+                "todoDiscipline": true,
+                "internalFileGuard": true,
+                "authoritativeContinuationState": true,
+                "userPermissionEscalation": true,
+                "taskChangePermission": true,
+                "dependencyInstallPermission": true,
+                "plannerQuestionEnforcer": true,
+                "guardLearning": true,
+                "executorReview": true,
+                "workerHelp": true,
+                "plannerRecovery": true,
+                "executorBaselineRecovery": true,
+                "transactionalWorkerChanges": true,
+                "workerSessionArchive": true,
+                "doctorVerifyTimeoutMs": 600000
+            },
+            "modes": {
+                "plannerAgents": [
+                    "planner"
+                ],
+                "executorAgents": [
+                    "executor"
+                ],
+                "workerAgents": [
+                    "worker"
+                ],
+                "plannerWritablePaths": [
+                    "kanban/todo",
+                    "MEMORY.md"
+                ]
+            },
+            "protectedAgentPaths": [
+                "scripts/task-doctor.mjs",
+                "scripts/app-control.mjs",
+                "scripts/update-harness.mjs",
+                "harness-manifest.json",
+                ".task-doctor",
+                ".opencode",
+                "opencode.json"
+            ],
+            "readOnlyAgentPaths": [
+                "kanban/TASK.md",
+                "CUSTOM.md",
+                "WORKER.md"
+            ]
+        }
+    }
+}
