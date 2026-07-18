@@ -103,7 +103,10 @@ import {
   doctorFailureFingerprint,
   loopFailureFingerprint,
   replaceOccurrenceMismatches,
+  reviewableWorkerHelpRequests,
   restoreOnlyOutsideScopeFailure,
+  selectWorkerHelpForReview,
+  supersedeCompetingWorkerHelp,
   type LoopFailureFingerprint,
   type RestoreOnlyOutsideScopeFailure,
   type WorkerHelpRequest,
@@ -126,7 +129,15 @@ import { WorkflowRuntimeState } from "../lib/workflow-engine/runtime-state.ts"
 import { readAuthoritativeWorkflowSnapshot as readWorkflowSnapshot } from "../lib/workflow-engine/snapshot.ts"
 import { executeWorkflowEffects, reduceWorkflow } from "../lib/workflow-engine/engine.ts"
 import { clearFailures, recordFailure } from "../lib/workflow-engine/failure-window.ts"
-import { composeWorkflowPrompt, directiveFromAction, workflowDirective } from "../lib/workflow-engine/prompt-composer.ts"
+import { composeWorkflowPrompt, directiveFromAction, selectWorkflowDirective, workflowDirective } from "../lib/workflow-engine/prompt-composer.ts"
+import { hasCompletedPlannerDiscoveryPlan } from "../lib/workflow-engine/role-policy.ts"
+import {
+  advanceDelegationLease,
+  delegationLeaseFromHelp,
+  normalizeBoundWorkerTaskArgs,
+  reconcileDelegationLease,
+  type SessionObservation,
+} from "../lib/workflow-engine/delegation-lease.ts"
 import type {
   AuthoritativeWorkflowDecision,
   WorkflowAction,
@@ -602,6 +613,25 @@ function todoTasks(root: string) {
   return readdirSync(directory).filter((name) => name.endsWith(".md")).sort()
 }
 
+function projectHasImplementation(root: string) {
+  const managed = new Set<string>(readJson(resolve(root, "harness-manifest.json"))?.files ?? [])
+  const excluded = new Set([".git", ".opencode", ".task-doctor", "kanban", "node_modules", "dist", "build", "coverage"])
+  const visit = (directory: string, prefix = ""): boolean => {
+    if (!existsSync(directory)) return false
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = prefix ? `${prefix}/${entry.name}` : entry.name
+      if (entry.isDirectory()) {
+        if (!excluded.has(entry.name) && visit(resolve(directory, entry.name), path)) return true
+        continue
+      }
+      if (entry.isFile() && /\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|rb|php|vue|svelte|html|css)$/i.test(path)
+        && !managed.has(path)) return true
+    }
+    return false
+  }
+  return visit(root)
+}
+
 function taskRegistrationValid(root: string, name: string) {
   const taskPath = resolve(root, "kanban/todo", name)
   const registration = readJson(resolve(root, ".task-doctor/registrations", `${name}.json`))
@@ -665,7 +695,7 @@ function assertWorkerHelpFileSafe(path: string) {
 function validWorkerHelpStore(value: unknown): value is WorkerHelpStore {
   if (!value || typeof value !== "object") return false
   const candidate = value as Partial<WorkerHelpStore>
-  if (candidate.version !== 1 || !Array.isArray(candidate.requests)) return false
+  if (![1, 2].includes(candidate.version ?? 0) || !Array.isArray(candidate.requests)) return false
   const ids = new Set<string>()
   for (const request of candidate.requests) {
     if (!request || typeof request !== "object" || typeof request.id !== "string" || !/^H\d+$/i.test(request.id)) return false
@@ -747,8 +777,15 @@ function durableWorkerHelpStore(root: string): WorkerHelpStore {
 function serializeWorkerHelpStore(store: WorkerHelpStore) {
   return `${JSON.stringify({
     ...store,
-    version: 1,
-    requests: store.requests.slice(-200),
+    version: 2,
+    requests: store.requests.slice(-200).map((request) => {
+      const delegation = delegationLeaseFromHelp(request)
+      return {
+        ...request,
+        version: 2,
+        ...(delegation ? { delegation } : {}),
+      }
+    }),
     updatedAt: new Date().toISOString(),
   }, null, 2)}\n`
 }
@@ -808,17 +845,19 @@ function changedFilesForReview(root: string, state: any): string[] {
     : changedSnapshotPaths(state?.snapshot ?? {}, state?.verifiedSnapshot ?? {})
 }
 
-function authoritativeWorkflowState(root: string) {
+function authoritativeWorkflowState(root: string, role: WorkflowRole = "unknown", requestedOperation?: string | null) {
   const transition = reduceWorkflow({ type: "authoritative.snapshot", snapshot: readWorkflowSnapshot({
+    role: () => role,
     doctorState: () => activeState(root),
     checkpoint: () => readJson(resolve(root, ".task-doctor/workflow-checkpoint.json")),
     lastDoctorFailure: () => readJson(resolve(root, ".task-doctor/last-doctor-failure.json")),
     openTasks: () => todoTasks(root).map((name) => `kanban/todo/${name}`),
-    currentHelp: (taskPath, taskHash) => currentWorkerHelp(root, taskPath, taskHash),
+    currentHelp: (taskPath, taskHash) => latestWorkerHelp(root, taskPath, taskHash),
     memoryRecovery: () => projectMemoryRecoveryStatus(root),
     harnessRecovery: () => configFor(root).executorBaselineRecovery ? taskHarnessRecoveryStatus(root) : null,
     plannerOwner: (taskPath) => readPlannerOwnership(root, taskPath),
     plannerRecovery: () => plannerRecoveryState(root),
+    requestedOperation: () => requestedOperation ?? null,
   }) })
   const decision = transition.value as AuthoritativeWorkflowDecision
   return {
@@ -1348,6 +1387,11 @@ function latestUserMessageText(messages: any[]) {
   return { message, text }
 }
 
+function latestUserRequestsPlanning(messages: any[]) {
+  const { text } = latestUserMessageText(messages)
+  return /\b(?:plan(?:e|en|st|t|ung|ning)?|registrier\w*|register)\b/i.test(text)
+}
+
 function explicitUserRejectsPlanner(messages: any[], taskPath: string) {
   const { text } = latestUserMessageText(messages)
   return text.toLowerCase().includes(taskPath.toLowerCase()) && plannerRejectedByUser(text)
@@ -1428,6 +1472,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
   const enabled = doctorProject(root)
   const runtimeState = new WorkflowRuntimeState()
   const sessionFeedback = runtimeState.map<WorkflowFeedback>("sessionFeedback")
+  const sessionTerminalActions = runtimeState.map<WorkflowAction>("sessionTerminalActions")
   const repetitions = runtimeState.map<{ signature: string; count: number }>("repetitions")
   const pendingCompact = runtimeState.set("pendingCompact")
   const idlePromptedFor = runtimeState.map<string>("idlePromptedFor")
@@ -1439,6 +1484,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
   const plannerQuestionCorrections = runtimeState.map<string>("plannerQuestionCorrections")
   const plannerCompletionCorrections = runtimeState.map<string>("plannerCompletionCorrections")
   const plannerEmptyStopRecoveries = runtimeState.map<number>("plannerEmptyStopRecoveries")
+  const plannerDiscoveryCorrections = runtimeState.map<number>("plannerDiscoveryCorrections")
   const plannerPlanReady = runtimeState.set("plannerPlanReady")
   const requestedProjectOperations = runtimeState.map<string[]>("requestedProjectOperations")
   const executorReadyAfterSchedule = runtimeState.map<string>("executorReadyAfterSchedule")
@@ -1543,95 +1589,9 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
     return role === "unknown" ? "The current role" : `${role.slice(0, 1).toUpperCase()}${role.slice(1)}`
   }
 
-  function feedbackDirective(sessionID: string, text: string): WorkflowDirective {
-    const role = roleForSession(sessionID)
-    const actor = roleLabel(role)
-    const state = activeState(root)
-    const taskPath = typeof state?.taskPath === "string" ? state.taskPath : undefined
-    const helpID = text.match(/(?:^|\n)Help ID:\s*([^\s]+)/i)?.[1]
-      ?? (state?.taskPath ? currentWorkerHelp(root, state.taskPath, state.taskHash)?.id : undefined)
-    if (/Return BLOCKED|TASK DOCTOR:\s+EXECUTOR RECOVERY REQUIRED/i.test(text)) {
-      return workflowDirective(workflowAction(
-        "feedback.return_blocked",
-        role,
-        "return",
-        `${actor} must return the stored BLOCKED handoff now and stop.`,
-        { taskPath },
-      ), { priority: "terminal", terminal: true })
-    }
-    if (/request_executor_help/i.test(text)) {
-      return workflowDirective(workflowAction(
-        "feedback.request_executor_help",
-        "worker",
-        "tool",
-        "Worker must call request_executor_help once with the stored technical evidence.",
-        { tool: "request_executor_help", taskPath, helpID },
-      ), {
-        priority: "help",
-        after: workflowAction("feedback.stop_after_help", "worker", "stop", "Worker must stop after the help request is stored.", { taskPath }),
-      })
-    }
-    if (/WORKER HELP IS TERMINAL|Do not call another tool|Stop now|End (?:now|this response)|Stop this role run|terminal after compaction/i.test(text)) {
-      return workflowDirective(workflowAction(
-        "feedback.terminal_stop",
-        role,
-        "stop",
-        `${actor} must stop this turn and preserve the stored workflow handoff.`,
-        { taskPath },
-      ), { priority: "terminal", terminal: true })
-    }
-    if (/Return (?:the canonical )?REVIEWABLE/i.test(text) && !/Do not return REVIEWABLE/i.test(text)) {
-      return workflowDirective(workflowAction(
-        "feedback.return_reviewable",
-        "worker",
-        "return",
-        "Worker must return the canonical REVIEWABLE handoff now.",
-        { taskPath },
-      ), { priority: "review", terminal: true })
-    }
-    if (/call (?:zero-argument )?verify_worker_task|Call verify_worker_task/i.test(text)) {
-      return workflowDirective(workflowAction(
-        "feedback.verify_worker_task",
-        "worker",
-        "tool",
-        "Worker must call verify_worker_task once against the current revision.",
-        { tool: "verify_worker_task", taskPath },
-      ), { priority: "active" })
-    }
-    if (/Preview\/Apply|preview_worker_changes|apply_worker_changes/i.test(text)) {
-      return workflowDirective(workflowAction(
-        "feedback.continue_transaction",
-        "worker",
-        "continue",
-        `Worker must continue ${taskPath ?? "the active task"} through one scoped Preview/Apply transaction.`,
-        { taskPath },
-      ), { priority: "active", forbids: ["schedule", "complete"] })
-    }
-    if (/Required rerun:|correct every applicable requirement|Use the exact Doctor findings/i.test(text)) {
-      return workflowDirective(workflowAction(
-        "feedback.correct_technical_cause",
-        "worker",
-        "continue",
-        `Worker must correct the stored technical cause for ${taskPath ?? "the active task"} before repeating the required verification.`,
-        { taskPath },
-      ), { priority: "active", forbids: ["unchanged retry"] })
-    }
-    return workflowDirective(workflowAction(
-      "feedback.evidence_only",
-      role,
-      "wait",
-      role === "unknown"
-        ? "Wait for an explicit structured workflow action."
-        : `${roleLabel(role)} must wait for an explicit structured workflow action.`,
-    ), { priority: "idle", precedence: -100 })
-  }
-
-  function setSessionFeedback(sessionID: string, value: unknown, directive?: WorkflowDirective): void {
+  function setSessionFeedback(sessionID: string, value: unknown): void {
     const evidence = String(value ?? "").trim()
-    sessionFeedback.set(sessionID, {
-      evidence,
-      directive: directive ?? feedbackDirective(sessionID, evidence),
-    })
+    sessionFeedback.set(sessionID, { evidence })
   }
 
   function sessionFeedbackText(sessionID: string): string | undefined {
@@ -1664,7 +1624,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       taskPath: action.taskPath,
       facts: options.facts ?? [],
       evidence: options.evidence,
-      directives: [directive],
+      directive,
     })
     if (composed.diagnostics.length > 0) throw new Error(`Invalid composed workflow prompt ${action.code}: ${composed.diagnostics.join("; ")}`)
     return composed.text
@@ -1980,6 +1940,145 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
 
   async function loadSessionMessages(sessionID: string, limit = 200, maxPages = 20) {
     return (await loadSessionTranscript(sessionID, limit, maxPages)).messages
+  }
+
+  async function observeDelegatedWorkerSession(
+    request: WorkerHelpRequest,
+    state: { status?: string; taskPath?: string; taskHash?: string } | null,
+  ): Promise<SessionObservation | null> {
+    const workerSessionID = request.delegatedWorkerSessionID ?? request.delegation?.workerSessionID
+    if (!workerSessionID) return null
+    if (typeof (client as any)?.session?.status !== "function") return null
+    try {
+      const [statusResult, listResult, transcript] = await Promise.all([
+        client.session.status({ query: { directory: root } } as any),
+        typeof (client as any)?.session?.list === "function"
+          ? client.session.list({ query: { directory: root } } as any)
+          : Promise.resolve(null),
+        loadSessionTranscript(workerSessionID),
+      ])
+      if ((statusResult as any)?.error || (listResult as any)?.error) return null
+      const statuses = unwrap<Record<string, any>>(statusResult)
+      const sessions = listResult === null ? null : unwrap<any[]>(listResult)
+      if (!statuses || typeof statuses !== "object" || Array.isArray(statuses)) return null
+      if (Array.isArray(sessions) && !sessions.some((session) => session?.id === workerSessionID)) {
+        return { state: "missing" }
+      }
+      const status = statuses[workerSessionID]
+      if (status && status.type !== "idle") return { state: "busy" }
+
+      const latest = latestAssistantMessage(transcript.messages)
+      const aborted = latest?.info?.error?.name === "MessageAbortedError"
+        || latest?.info?.finish === "cancelled"
+        || latest?.info?.finish === "aborted"
+      if (aborted) return { state: "terminal" }
+      if (!latest || !latestAssistantFinished(transcript.messages)) return { state: "idle" }
+
+      const text = latestAssistantText(transcript.messages).trim()
+      const terminalHelp = workerHelpForSession(workerSessionID, request.taskPath, request.taskHash)
+      const issue = workerReturnIssue({
+        text,
+        taskPath: request.taskPath,
+        doctorStatus: state?.status,
+        doctorTaskPath: state?.taskPath,
+        requireTerminalHandoff: true,
+        helpRequestID: terminalHelp?.id,
+      })
+      return { state: "terminal", handoff: issue ? null : text }
+    } catch (error) {
+      await log("warn", "Could not observe a bound Worker session", {
+        helpID: request.id,
+        task: request.taskPath,
+        workerSessionID,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return null
+    }
+  }
+
+  async function reduceDelegationObservation(
+    request: WorkerHelpRequest,
+    observation: SessionObservation | null,
+    parentSessionID?: string,
+  ) {
+    const lease = delegationLeaseFromHelp(request)
+    const transition = reduceWorkflow({
+      type: "delegation.reconcile",
+      lease,
+      observation,
+      parentSessionID,
+    })
+    await executeWorkflowEffects(transition.effects, {
+      clearSession() {},
+      releaseDelegation(effectLease) {
+        updateWorkerHelp(effectLease.helpID, (current) => {
+          const currentLease = delegationLeaseFromHelp(current)
+          if (!currentLease || currentLease.revision !== effectLease.revision) return current
+          return restorePersistedHelpDelegation(current, effectLease.priorStatus)
+        })
+        if (effectLease.workerSessionID) cleanupWorkerChangesForSession(root, effectLease.workerSessionID)
+      },
+      markDelegationTerminal(effectLease, workerSessionID, handoff) {
+        updateWorkerHelp(effectLease.helpID, (current) => {
+          const currentLease = delegationLeaseFromHelp(current)
+          if (!currentLease || currentLease.revision !== effectLease.revision) return current
+          return {
+            ...current,
+            delegation: advanceDelegationLease(
+              currentLease,
+              claimsReviewableHandoff(handoff) ? "reviewable" : "closed",
+              new Date().toISOString(),
+              workerSessionID,
+            ),
+          }
+        })
+      },
+      deliverDelegationHandoff(effect) {
+        if (claimsReviewableHandoff(effect.handoff)) {
+          rememberReviewableWorker(effect.lease.taskPath, effect.workerSessionID)
+        } else if (!workerHelpForSession(effect.workerSessionID, effect.lease.taskPath, effect.lease.taskHash)) {
+          const source = workerHelpStore(root).requests.find((entry) => entry.id === effect.lease.helpID)
+          persistInvalidWorkerReturnHelp({
+            sessionID: effect.workerSessionID,
+            taskPath: effect.lease.taskPath,
+            taskHash: effect.lease.taskHash,
+            issue: "Recovered terminal Worker handoff requires Executor review.",
+            failure: null,
+            relevantFiles: source?.relevantFiles ?? [],
+          })
+        }
+        if (effect.parentSessionID) {
+          setSessionFeedback(effect.parentSessionID, [
+            "RECOVERED WORKER HANDOFF",
+            `Task: ${effect.lease.taskPath}`,
+            `Worker session: ${effect.workerSessionID}`,
+            effect.handoff,
+          ].join("\n\n"))
+        }
+      },
+    })
+    return transition.value as ReturnType<typeof reconcileDelegationLease>
+  }
+
+  async function reconcileBoundWorkerForPrompt(sessionID: string) {
+    if (!features.workerHelp || roleForSession(sessionID) !== "executor") return
+    const state = activeState(root)
+    if (state?.status !== "started" || !state.taskPath || !state.taskHash) return
+    const request = latestWorkerHelp(root, state.taskPath, state.taskHash)
+    const lease = delegationLeaseFromHelp(request)
+    if (!request || !lease?.workerSessionID) return
+    const observation = await observeDelegatedWorkerSession(request, state)
+    const resolution = await reduceDelegationObservation(request, observation, sessionID)
+    if (resolution.kind === "fresh") {
+      await log("warn", "Released a terminal bound Worker before composing Executor state", {
+        sessionID,
+        helpID: request.id,
+        task: request.taskPath,
+        workerSessionID: resolution.lease.workerSessionID,
+      })
+      return
+    }
+    if (resolution.kind !== "deliver") return
   }
 
   function canonicalPlannerRecoveryFiles(sessionID: string, taskPath: string, rawPaths: string[]) {
@@ -2598,7 +2697,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
   function writeWorkerHelpStore(store: WorkerHelpStore) {
     mutateWorkerHelpStore(root, (current) => {
       if (current === store) return
-      current.version = 1
+      current.version = 2
       current.requests = store.requests
       current.updatedAt = store.updatedAt
     })
@@ -4132,14 +4231,28 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
     boosted = false,
   ) {
     const normalizedCallID = typeof callID === "string" && callID.length > 0 ? callID : undefined
+    const delegatedAt = new Date().toISOString()
     return {
       status: "delegated" as const,
-      delegatedAt: new Date().toISOString(),
+      delegatedAt,
       delegationPriorStatus: reviewedHelp.status as "retry_approved" | "task_changed",
       delegationParentSessionID: parentSessionID,
       delegationDescription: `Resume ${reviewedHelp.taskPath}`,
       ...(normalizedCallID ? { delegationCallID: normalizedCallID } : {}),
       delegationSource: source,
+      delegation: {
+        version: 1 as const,
+        phase: "launching" as const,
+        taskPath: reviewedHelp.taskPath,
+        taskHash: reviewedHelp.taskHash,
+        helpID: reviewedHelp.id,
+        priorStatus: reviewedHelp.status as "retry_approved" | "task_changed",
+        parentSessionID,
+        ...(normalizedCallID ? { callID: normalizedCallID } : {}),
+        source,
+        revision: 1,
+        updatedAt: delegatedAt,
+      },
       ...(typeof attemptNonce === "string" && attemptNonce.length > 0
         ? { delegationAttemptNonce: attemptNonce }
         : {}),
@@ -4148,6 +4261,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
   }
 
   function bindPersistedHelpDelegation(request: WorkerHelpRequest, workerSessionID: string): WorkerHelpRequest {
+    const lease = delegationLeaseFromHelp(request)
     const recoveryPriorStatus = request.recoveryBoost ? request.delegationPriorStatus : undefined
     const {
       delegationPriorStatus: _priorStatus,
@@ -4162,6 +4276,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       ...current,
       ...(recoveryPriorStatus ? { delegationPriorStatus: recoveryPriorStatus } : {}),
       delegatedWorkerSessionID: workerSessionID,
+      ...(lease ? { delegation: advanceDelegationLease(lease, "running", new Date().toISOString(), workerSessionID) } : {}),
     }
   }
 
@@ -4175,6 +4290,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       delegationCallID: _callID,
       delegationSource: _source,
       delegationAttemptNonce: _attemptNonce,
+      delegation: _delegation,
       recoveryBoost: _recoveryBoost,
       ...current
     } = request
@@ -4878,7 +4994,8 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       : request)
     if (run.status !== "pass") {
       setSessionFeedback(sessionID, [
-        "WORKER RECOVERY BOOST COMPLETE",
+        "WORKFLOW CONTROL",
+        "Code: worker_recovery_boost_complete",
         `The reviewed hurdle from ${help.id} is no longer the current Doctor finding.`,
         "Do not call another tool in the boosted turn. End this response now; the Harness continues the same Worker session once with the base Worker model.",
       ].join("\n"))
@@ -6743,8 +6860,10 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
     markBaseContinuationDelivered()
   }
 
-  function volatileWorkflowGuardText(sessionID: string) {
+  async function volatileWorkflowGuardText(sessionID: string) {
+    await reconcileBoundWorkerForPrompt(sessionID)
     const feedback = sessionFeedback.get(sessionID)
+    const terminalAction = sessionTerminalActions.get(sessionID)
     const savedCheckpoint = readJson(resolve(root, ".task-doctor/workflow-checkpoint.json"))
     const pendingHelpReviewID = executorHelpReviewPending.get(sessionID)
     const requestedHelpReReviewID = executorHelpReReviewRequested.get(sessionID)
@@ -6776,15 +6895,6 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
           ? "worker"
           : "unknown"
     const explicitOperations = requestedProjectOperations.get(sessionID) ?? []
-    const explicitOperationAction = explicitOperations[0] && ["planner", "executor"].includes(role)
-      ? workflowAction(
-          "project.run_requested_operation",
-          role,
-          "tool",
-          `${roleLabel(role)} must run ${explicitOperations[0]}.`,
-          { tool: explicitOperations[0] },
-        )
-      : null
     const sessionAction = reduceWorkflow({ type: "session.action", input: {
       role,
       doctorStatus: currentState?.status ?? "none",
@@ -6804,16 +6914,15 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       plannerRecoveryRequest: currentPlannerRecoveryRequest
         ? { taskPath: currentPlannerRecoveryRequest.taskPath, frozen: pendingFrozenPlannerReview }
         : null,
-      plannerHasRegisteredTasks: role === "planner"
-        && plannerOwnedTodoTasks(root, sessionID).some((taskPath) => taskRegistrationValid(root, taskPath.split("/").pop()!)),
       scheduledReadyTask: role === "executor" ? scheduledReady : null,
       executorScheduleRequired: role === "executor"
         && currentState?.status !== "started"
         && currentState?.status !== "passed"
+        && todoTasks(root).some((name) => taskRegistrationValid(root, name))
         && !executorScheduledNoReady.has(sessionID),
     } }).value as WorkflowAction | null
     const authoritativeDecision = features.authoritativeContinuationState
-      ? authoritativeWorkflowState(root).decision
+      ? authoritativeWorkflowState(root, role, explicitOperations[0]).decision
       : null
     const terminalWorkerHarnessRecovery = features.executorBaselineRecovery
       && modeSettings.workerAgents.has(agent)
@@ -6821,14 +6930,40 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
     const pendingLearnings = features.guardLearning && !terminalWorkerHarnessRecovery
       ? [...pendingGuardLearningsForAgent(sessionID).values()]
       : []
-    if (!authoritativeDecision && !feedback && !savedCheckpoint && pendingLearnings.length === 0) return null
-    const explicitOperationAllowed = explicitOperationAction
-      && !deterministicRecoveryPending
-      && !terminalExecutorReasons.get(sessionID)
-    const baseAction = explicitOperationAllowed ? null : sessionAction ?? authoritativeDecision?.nextAction
-    const baseDirective = baseAction
-      ? { ...directiveFromAction(baseAction), precedence: sessionAction ? 50 : 0 }
-      : null
+    if (!authoritativeDecision && !feedback && !terminalAction && !savedCheckpoint && pendingLearnings.length === 0) return null
+    const authoritativeAction = authoritativeDecision?.nextAction
+    const baseDirective = selectWorkflowDirective(
+      authoritativeAction
+        ? {
+            ...directiveFromAction(authoritativeAction),
+            precedence: authoritativeAction.code === "project.run_requested_operation" ? 60 : 0,
+            ...(authoritativeAction.code === "project.run_requested_operation" && explicitOperations[1]
+              ? {
+                  after: workflowAction(
+                    "project.run_requested_operation.after",
+                    role,
+                    "tool",
+                    `${roleLabel(role)} must run ${explicitOperations[1]}.`,
+                    { tool: explicitOperations[1] },
+                  ),
+                }
+              : {}),
+          }
+        : null,
+      sessionAction
+        ? {
+            ...directiveFromAction(sessionAction),
+            precedence: 50,
+          }
+        : null,
+      terminalAction
+        ? {
+            ...directiveFromAction(terminalAction),
+            precedence: 100,
+          }
+        : null,
+    )
+    const baseAction = baseDirective
     const learningAction = pendingLearnings.length > 0
       ? workflowAction(
           "guard.record_pending_learning",
@@ -6838,32 +6973,22 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
           { tool: "record_guard_learning", taskPath: currentState?.taskPath },
         )
       : null
-    const explicitOperationDirective = explicitOperationAllowed
-      ? workflowDirective(explicitOperationAction, {
-          priority: "active",
-          precedence: 500,
-          after: explicitOperations[1]
-            ? workflowAction(
-                "project.run_requested_operation.after",
-                role,
-                "tool",
-                `${roleLabel(role)} must run ${explicitOperations[1]}.`,
-                { tool: explicitOperations[1] },
-              )
-            : undefined,
-        })
-      : null
-    const stateDirective = explicitOperationDirective
-      ?? (learningAction && (!baseDirective || baseDirective.priority === "idle")
+    const stateDirective = learningAction && (!baseDirective || baseDirective.priority === "idle")
       ? workflowDirective(learningAction, { priority: "active", precedence: 25 })
       : learningAction && baseDirective && !baseDirective.terminal && !baseDirective.after
         ? { ...baseDirective, after: learningAction }
-        : baseDirective)
+        : baseDirective
+    const primaryDirective = stateDirective ?? workflowDirective(workflowAction(
+      "workflow.wait",
+      role,
+      "wait",
+      role === "unknown" ? "Wait for an explicit user request." : `${roleLabel(role)} must follow the explicit user request or wait.`,
+    ), { priority: "idle" })
     const composition = composeWorkflowPrompt({
       role,
       revision: authoritativeDecision?.revision,
-      taskPath: explicitOperationDirective ? undefined : currentState?.taskPath,
-      helpID: explicitOperationDirective ? undefined : pendingHelpReviewID ?? requestedHelpReReviewID ?? authoritativeDecision?.help?.id,
+      taskPath: baseAction?.code === "project.run_requested_operation" ? undefined : currentState?.taskPath,
+      helpID: baseAction?.code === "project.run_requested_operation" ? undefined : pendingHelpReviewID ?? requestedHelpReReviewID ?? authoritativeDecision?.help?.id,
       facts: [
         ...(authoritativeDecision ? authoritativeWorkflowFacts(authoritativeDecision) : []),
         activePlannerRecovery ? `Planner recovery: active trusted recovery for ${activePlannerRecovery.taskPath}` : "",
@@ -6871,10 +6996,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
         ...pendingLearnings.map((violation) => `Pending Guard learning ${violation.id}: ${violation.problem}`),
       ],
       evidence: feedback?.evidence,
-      directives: [
-        stateDirective,
-        feedback?.directive ? { ...feedback.directive, precedence: 100 } : null,
-      ].filter((value): value is WorkflowDirective => Boolean(value)),
+      directive: primaryDirective,
     })
     return composition.text
   }
@@ -6900,9 +7022,15 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
             )
           }
           if (!plannerPlanReady.has(context.sessionID)) {
+            const messages = await loadSessionMessages(context.sessionID)
+            if (hasCompletedPlannerDiscoveryPlan(messages, modeSettings.plannerAgents, projectHasImplementation(root))) {
+              plannerPlanReady.add(context.sessionID)
+            }
+          }
+          if (!plannerPlanReady.has(context.sessionID)) {
             throw projectGuardError(context.sessionID,
-              "Planner attempted task registration before completing a planning turn.",
-              "Return a concise response beginning with PLAN and stop. Register tasks only in a later Planner turn.",
+              "Planner attempted task registration before completing project discovery and a planning turn.",
+              "Inspect the project tree, manifests, entry points, and relevant implementation files. Then return PLAN and stop. Register only in a later turn.",
             )
           }
           const preferredFiles = Array.isArray(args.files) ? args.files : []
@@ -7075,7 +7203,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
                 verifyRepaired ? "Input repair: converted in-project absolute Verify paths to portable paths for the command working directory." : null,
                 lint.stdout.trim(),
                 registration.stdout.trim(),
-                "Create the next approved task with register_planner_task, or run npm run task:doctor:schedule once when planning is complete. Do not run lint or register separately.",
+                "Create the next approved task with register_planner_task. When planning is complete, tell the user Executor can schedule. Do not run Doctor directly.",
               ].filter(Boolean).join("\n"),
               metadata: { task: taskPath, taskHash: fileHash(taskAbsolute), context: normalizedFiles.context, ignoredLegacyContent, pathCollisionRepaired, memoryActionRepaired, verifyRepaired },
             }
@@ -8566,15 +8694,14 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
           if (selector.taskPath && selector.taskPath !== mechanicalState.taskPath) {
             throw new Error(`MECHANICAL WORKER HELP SELECTOR REJECTED\n${selector.taskPath} is not the exact active task ${mechanicalState.taskPath}.`)
           }
-          const reviewable = reconcileWorkerHelpLifecycle(mechanicalState).requests.filter((request) => (
-            request.taskPath === mechanicalState.taskPath
-            && request.taskHash === mechanicalState.taskHash
-            && (request.status === "pending"
-              || (request.status === "retry_approved" && !request.delegatedWorkerSessionID))
-          ))
-          const request = selector.helpID
-            ? reviewable.find((entry) => entry.id.toLowerCase() === selector.helpID)
-            : reviewable.length === 1 ? reviewable[0] : undefined
+          const reconciledHelp = reconcileWorkerHelpLifecycle(mechanicalState).requests
+          const reviewable = reviewableWorkerHelpRequests(reconciledHelp, mechanicalState.taskPath, mechanicalState.taskHash)
+          const request = selectWorkerHelpForReview(
+            reconciledHelp,
+            mechanicalState.taskPath,
+            mechanicalState.taskHash,
+            selector.helpID,
+          )
           if (!request) {
             throw new Error(selector.helpID
               ? `No reviewable Worker help request ${selector.helpID} exists for the exact active task.`
@@ -8596,6 +8723,10 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
             reviewedFiles,
             reviewedAt: new Date().toISOString(),
           }
+          mutateWorkerHelpStore(root, (store) => {
+            store.requests = supersedeCompetingWorkerHelp(store.requests, request.id, executorReview.reviewedAt)
+            return request.id
+          })
           if (decision === "retry_worker") {
             updateWorkerHelp(request.id, (entry) => ({ ...entry, status: "retry_approved", executorReview }))
             executorReviewReads.delete(context.sessionID)
@@ -9168,6 +9299,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
         : ""
       const messageRole = String(agent ?? sessionAgents.get(sessionID) ?? "").toLowerCase()
       if (modeSettings.plannerAgents.has(messageRole) || modeSettings.executorAgents.has(messageRole)) {
+        sessionTerminalActions.delete(sessionID)
         const operations = requestedProjectOperationCommands(root, messageText)
         if (operations.length > 0) requestedProjectOperations.set(sessionID, operations)
         else requestedProjectOperations.delete(sessionID)
@@ -9249,7 +9381,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
       await hydrateSessionIdentity(sessionID, baseMessage.info?.model)
       const driver = driverForSession(sessionID)
       if (driver?.config.structuredState) return
-      const stateText = volatileWorkflowGuardText(sessionID)
+      const stateText = await volatileWorkflowGuardText(sessionID)
       if (!stateText) return
       const suffix = createHash("sha256").update(`workflow-guard:${sessionID}`).digest("hex").slice(0, 16)
       const messageID = `msg_workflow_guard_${suffix}`
@@ -9368,7 +9500,8 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
           : null
         if (clearedBoost) {
           throw new Error([
-            "WORKER RECOVERY BOOST COMPLETE",
+            "WORKFLOW CONTROL",
+            "Code: worker_recovery_boost_complete",
             `Help ID: ${clearedBoost.id}`,
             "The reviewed hurdle is cleared. Do not call another tool in this boosted turn.",
             "End this response now; the Harness continues the same Worker session once with the base Worker model.",
@@ -9645,7 +9778,14 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
         && input.tool === "bash"
         && /^npm\s+run\s+task:doctor:schedule\s*$/.test(command)
         && executorReadyAfterSchedule.has(input.sessionID)
-      if (features.repetitionDetector && !redundantExecutorSchedule) {
+      if (redundantExecutorSchedule) {
+        const ready = executorReadyAfterSchedule.get(input.sessionID)!
+        throw projectGuardError(input.sessionID,
+          `Executor already has READY task ${ready}.`,
+          `Delegate ${ready} through the task tool now.`,
+        )
+      }
+      if (features.repetitionDetector) {
         const signature = JSON.stringify([input.tool, output.args])
         const previous = repetitions.get(input.sessionID)
         const count = previous?.signature === signature ? previous.count + 1 : 1
@@ -9810,6 +9950,50 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
           requestedWorkerSession = undefined
         }
         let latestHelp = features.workerHelp ? latestWorkerHelp(root, delegated[0], state?.taskHash) : null
+        const lease = delegationLeaseFromHelp(latestHelp)
+        if (latestHelp?.status === "delegated" && lease?.workerSessionID) {
+          const observation = await observeDelegatedWorkerSession(latestHelp, state)
+          const resolution = await reduceDelegationObservation(latestHelp, observation, input.sessionID)
+          if (resolution.kind === "resume") {
+            output.args = normalizeBoundWorkerTaskArgs(output.args ?? {}, resolution)
+            requestedWorkerSession = resolution.workerSessionID
+            updateWorkerHelp(latestHelp.id, (request) => {
+              const current = delegationLeaseFromHelp(request)
+              return current
+                ? { ...request, delegation: advanceDelegationLease(current, "running", new Date().toISOString(), resolution.workerSessionID) }
+                : request
+            })
+            await log("info", "Self-healed Worker TaskTool session selector from the active delegation lease", {
+              sessionID: input.sessionID,
+              helpID: latestHelp.id,
+              task: latestHelp.taskPath,
+              workerSessionID: resolution.workerSessionID,
+            })
+          } else if (resolution.kind === "deliver") {
+            throw new Error([
+              "WORKER SESSION HANDOFF RECOVERED",
+              `Task: ${latestHelp.taskPath}`,
+              `Worker session: ${resolution.workerSessionID}`,
+              resolution.handoff,
+              "Use this exact technical handoff. Do not start another Worker.",
+            ].join("\n\n"))
+          } else if (resolution.kind === "fresh") {
+            for (const field of ["session_id", "sessionID", "task_id", "taskID"]) delete output.args[field]
+            requestedWorkerSession = undefined
+            latestHelp = currentWorkerHelp(root, delegated[0], state?.taskHash)
+            await log("warn", "Released a terminal Worker delegation and reused the same TaskTool call for a fresh Worker", {
+              sessionID: input.sessionID,
+              helpID: resolution.lease.helpID,
+              task: resolution.lease.taskPath,
+              terminalWorkerSessionID: resolution.lease.workerSessionID,
+            })
+          } else if (resolution.kind === "wait") {
+            throw projectGuardError(input.sessionID,
+              `Worker help ${latestHelp.id} already has Worker ${lease.workerSessionID} in flight.`,
+              "Wait for the bound Worker result. Do not start or resume another Worker turn.",
+            )
+          }
+        }
         if (latestHelp?.status === "delegated"
           && latestHelp.delegatedWorkerSessionID
           && requestedWorkerSession === latestHelp.delegatedWorkerSessionID
@@ -10111,7 +10295,7 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
 
       if (features.modeGuard) {
         const role = plannerMode ? "planner" : executorMode ? "executor" : workerMode ? "worker" : "unknown"
-        const plannerDoctor = input.tool === "bash" && /^npm\s+run\s+task:doctor:(?:next|schedule)\s*$/.test(command)
+        const plannerDoctor = input.tool === "bash" && /^npm\s+run\s+task:doctor:next\s*$/.test(command)
         const plannerInspection = input.tool === "bash" && plannerReadOnlyCommand(command)
         const planningTaskPath = paths.find((path) => planningPath.test(path))
         const roleState = plannerMode ? activeState(root) : null
@@ -10487,29 +10671,25 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
             requestedProjectOperations.delete(input.sessionID)
             if (!failed) {
               const role = roleForSession(input.sessionID)
-              setSessionFeedback(input.sessionID,
-                `Requested project operation completed: ${command}.`,
-                workflowDirective(workflowAction(
-                  "project.requested_operation_completed",
-                  role,
-                  "stop",
-                  `${roleLabel(role)} must report the requested project operation result and stop.`,
-                ), { priority: "terminal", terminal: true }),
-              )
+              setSessionFeedback(input.sessionID, `Requested project operation completed: ${command}.`)
+              sessionTerminalActions.set(input.sessionID, workflowAction(
+                "project.requested_operation_completed",
+                role,
+                "stop",
+                `${roleLabel(role)} must report the requested project operation result and stop.`,
+              ))
             }
           }
         }
         if (failed) {
           const role = roleForSession(input.sessionID)
-          setSessionFeedback(input.sessionID,
-            `Requested project operation failed: ${command}. Preserve its technical output and do not retry unchanged.`,
-            workflowDirective(workflowAction(
-              "project.requested_operation_failed",
-              role,
-              "stop",
-              `${roleLabel(role)} must report the requested project operation failure and stop.`,
-            ), { priority: "terminal", terminal: true }),
-          )
+          setSessionFeedback(input.sessionID, `Requested project operation failed: ${command}. Preserve its technical output and do not retry unchanged.`)
+          sessionTerminalActions.set(input.sessionID, workflowAction(
+            "project.requested_operation_failed",
+            role,
+            "stop",
+            `${roleLabel(role)} must report the requested project operation failure and stop.`,
+          ))
         }
       }
       const failedDoctor = staleWorkerDoctor ? null : reportedDoctor
@@ -11115,9 +11295,47 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
         await log("info", "Post-task compaction not required", { sessionID, tokens, contextLimit: contextLimit ?? null, usagePercent, thresholdPercent: taskCompactionThresholdPercent })
       }
       const assistantText = latestAssistantText(messages)
-      if (modeSettings.plannerAgents.has(latestAgent)
-        && /^\s*(?:#{1,6}\s*)?PLAN\b/i.test(assistantText)) {
+      const implementationExists = projectHasImplementation(root)
+      const completedPlannerDiscovery = hasCompletedPlannerDiscoveryPlan(messages, modeSettings.plannerAgents, implementationExists)
+      if (completedPlannerDiscovery) {
         plannerPlanReady.add(sessionID)
+        plannerDiscoveryCorrections.delete(sessionID)
+      } else if (modeSettings.plannerAgents.has(latestAgent)
+        && latestUserRequestsPlanning(messages)
+        && !usedQuestionTool(latestAssistant)
+        && !/^\s*BLOCKED\b/i.test(assistantText)) {
+        const attempts = plannerDiscoveryCorrections.get(sessionID) ?? 0
+        if (attempts >= 2) {
+          await log("warn", "Planner stopped after two project-discovery corrections", { sessionID, attempts })
+          return
+        }
+        plannerDiscoveryCorrections.set(sessionID, attempts + 1)
+        await log("info", "Resuming Planner for project discovery before PLAN", { sessionID, attempt: attempts + 1 })
+        await client.session.promptAsync({
+          path: { id: sessionID },
+          query: { directory: root },
+          body: {
+            agent: latestAgent,
+            model: automaticAgentModel(root, latestAgent, latestAssistant?.info),
+            parts: [{ type: "text", text: composedActionPrompt("planner", workflowAction(
+              "planner.discover_project",
+              "planner",
+              "continue",
+              implementationExists
+                ? "Planner must inspect the project tree, one manifest, and two relevant implementation files."
+                : "Planner must inspect the project tree and one manifest, then confirm that no project code exists.",
+            ), {
+              after: workflowAction(
+                "planner.plan_after_discovery",
+                "planner",
+                "stop",
+                "After inspection, Planner must return PLAN and stop.",
+              ),
+              forbids: ["task registration", "implementation", "delegation", "MEMORY as discovery evidence"],
+            }) }],
+          },
+        })
+        return
       }
       if (features.plannerQuestionEnforcer && modeSettings.plannerAgents.has(latestAgent)) {
         if (usedQuestionTool(latestAssistant)) {
@@ -11501,23 +11719,8 @@ export const WorkflowGuard: Plugin = async ({ directory, worktree, client, serve
               forbids: ["direct task editing", "direct Doctor lint/register", "implementation", "delegation"],
             })
           } else {
-            const schedule = run(root, "node", ["scripts/task-doctor.mjs", "schedule"])
-            if (schedule.status !== 0) {
-              const output = [schedule.stdout, schedule.stderr].filter(Boolean).join("\n").trim() || `schedule exited with ${schedule.status ?? "a signal"}`
-              signature = `schedule:${hash(output)}`
-              prompt = composedActionPrompt("planner", workflowAction(
-                "planner.correct_schedule_failure",
-                "planner",
-                "continue",
-                "Planner must correct the first owned task definition named by the Doctor failure.",
-              ), {
-                evidence: output.slice(-3000),
-                forbids: ["implementation", "delegation", "changes to another Planner's task"],
-              })
-            } else {
-              plannerCompletionCorrections.delete(sessionID)
-              await log("info", "Planner completion preflight passed", { sessionID, ownedTasks })
-            }
+            plannerCompletionCorrections.delete(sessionID)
+            await log("info", "Planner registration complete; Executor owns scheduling", { sessionID, ownedTasks })
           }
           if (prompt !== null) {
             if (plannerCompletionCorrections.get(sessionID) === signature) {

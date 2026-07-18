@@ -23,6 +23,43 @@ export type RolePolicyInput = {
   plannerRecovery?: { lifecycle: "active" | "prestart"; taskPath: string } | null
 }
 
+const plannerManifestNames = /^(?:package\.json|project\.json|pyproject\.toml|Cargo\.toml|go\.mod|pom\.xml|build\.gradle(?:\.kts)?)$/
+const implementationExtension = /\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|rb|php|vue|svelte|html|css)$/i
+
+export function hasCompletedPlannerDiscoveryPlan(messages: any[], plannerAgents: Set<string>, projectHasImplementation = true) {
+  let inventory = false
+  let manifest = false
+  const implementationFiles = new Set<string>()
+
+  for (const message of messages) {
+    const info = message?.info
+    const agent = String(info?.agent ?? info?.mode ?? "").toLowerCase()
+    if (info?.role !== "assistant" || !plannerAgents.has(agent)) continue
+    for (const part of message?.parts ?? []) {
+      if (part?.type === "text" && /(?:^|\n)\s*(?:#{1,6}\s*|\*\*)?PLAN\b/i.test(String(part.text ?? ""))) {
+        if (info?.time?.completed && info?.finish === "stop"
+          && inventory && manifest && (!projectHasImplementation || implementationFiles.size >= 2)) return true
+        continue
+      }
+      if (part?.type !== "tool" || part?.state?.status !== "completed") continue
+      const tool = String(part.tool ?? "")
+      const input = part.state?.input ?? {}
+      if (tool === "glob") inventory = true
+      if (tool === "bash" && /^(?:ls|rg\s+--files)(?:\s|$)/.test(String(input.command ?? "").trim())) inventory = true
+      if (tool !== "read") continue
+      const path = String(input.filePath ?? input.path ?? "").replace(/\\/g, "/")
+      const name = path.split("/").pop() ?? ""
+      if (plannerManifestNames.test(name)) manifest = true
+      if (implementationExtension.test(path)
+        && !/(?:^|\/)(?:\.opencode|kanban)(?:\/|$)/.test(path)
+        && !/(?:^|\/)(?:AGENTS|CUSTOM|MEMORY|CODEX-INBOX|WORKER[^/]*)\.md$/i.test(path)) {
+        implementationFiles.add(path)
+      }
+    }
+  }
+  return false
+}
+
 export function decideRoleToolPolicy(input: RolePolicyInput): RolePolicyBlock | null {
   if (input.role === "planner") return plannerPolicy(input)
   if (input.role === "executor") return executorPolicy(input)
@@ -59,7 +96,7 @@ function plannerPolicy(input: RolePolicyInput): RolePolicyBlock | null {
     return {
       code: "planner.doctor_lifecycle",
       problem: `Planner cannot run Doctor ${input.invocation.gate}.`,
-      action: "Use register_planner_task for new tasks and only Doctor next or schedule directly. Switch to Worker before start, verify, complete, whitelist, or test-file.",
+      action: "Use register_planner_task for new tasks and only Doctor next directly. Executor owns schedule. Switch to Worker before start, verify, complete, whitelist, or test-file.",
     }
   }
   if (input.writes) {
@@ -112,6 +149,7 @@ function executorPolicy(input: RolePolicyInput): RolePolicyBlock | null {
       action: "Executor must delegate the exact registered task to Worker. Worker owns every Doctor lifecycle command except schedule.",
     }
   }
+  if (input.tool === "bash" && /^npm\s+run\s+task:doctor:schedule\s*$/.test(input.command)) return null
   if (input.tool === "bash" && !input.plannerDoctor && !input.plannerInspection && !input.projectOperation) {
     return {
       code: "executor.shell_allowlist",

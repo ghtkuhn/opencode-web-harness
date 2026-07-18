@@ -1,6 +1,8 @@
 import type { AuthoritativeWorkflowSnapshot, WorkflowHelpSnapshot } from "./types.ts"
+import { delegationLeaseFromHelp } from "./delegation-lease.ts"
 
 export type AuthoritativeWorkflowPorts = {
+  role?(): AuthoritativeWorkflowSnapshot["role"]
   doctorState(): any
   checkpoint(): any
   lastDoctorFailure(): any
@@ -10,6 +12,8 @@ export type AuthoritativeWorkflowPorts = {
   harnessRecovery(): { taskPath: string; paths: Array<{ path: string }> } | null
   plannerOwner(taskPath: string): { plannerSessionID?: string | null } | null
   plannerRecovery(): any
+  requestedOperation?(): string | null
+  sessionObservation?(): AuthoritativeWorkflowSnapshot["sessionObservation"]
 }
 
 export function readAuthoritativeWorkflowSnapshot(ports: AuthoritativeWorkflowPorts): AuthoritativeWorkflowSnapshot {
@@ -28,11 +32,18 @@ export function readAuthoritativeWorkflowSnapshot(ports: AuthoritativeWorkflowPo
     && ["unavailable", "incomplete"].includes(plannerRecovery.status)
       ? plannerRecovery
       : null
-  const normalizedHelp: WorkflowHelpSnapshot = help
-    ? { id: help.id, status: help.status, taskPath: help.taskPath, problem: help.problem }
+  const normalizedHelp: WorkflowHelpSnapshot = help && !["resolved", "obsolete"].includes(help.status)
+    ? {
+        id: help.id,
+        status: help.status,
+        taskPath: help.taskPath,
+        problem: help.problem,
+        delegation: delegationLeaseFromHelp(help),
+      }
     : null
 
   return {
+    role: ports.role?.() ?? "unknown",
     doctor: {
       status: doctorStatus,
       taskPath: doctorTask,
@@ -55,6 +66,8 @@ export function readAuthoritativeWorkflowSnapshot(ports: AuthoritativeWorkflowPo
           }
         : null,
     },
+    requestedOperation: ports.requestedOperation?.() ?? null,
+    sessionObservation: ports.sessionObservation?.() ?? null,
     lastDoctorFailure: savedFailure?.taskPath === doctorTask
       ? { gate: String(savedFailure.gate ?? "unknown"), output: String(savedFailure.output ?? "") }
       : null,

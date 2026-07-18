@@ -1,3 +1,6 @@
+import type { DelegationLease } from "../worker-help.ts"
+import type { SessionObservation } from "./delegation-lease.ts"
+
 export type WorkflowRole = "planner" | "executor" | "worker" | "unknown"
 
 export type WorkflowActionKind = "tool" | "continue" | "return" | "stop" | "wait"
@@ -30,12 +33,11 @@ export type PromptFrame = {
   helpID?: string | null
   facts: string[]
   evidence?: string | null
-  directives: WorkflowDirective[]
+  directive: WorkflowDirective
 }
 
 export type WorkflowFeedback = {
   evidence: string
-  directive: WorkflowDirective
 }
 
 export type ComposedWorkflowPrompt = {
@@ -79,15 +81,19 @@ export type WorkflowHelpSnapshot = {
   status: string
   taskPath: string
   problem: string
+  delegation?: DelegationLease | null
 } | null
 
 export type AuthoritativeWorkflowSnapshot = {
+  role: WorkflowRole
   doctor: DoctorWorkflowSnapshot
   completedTask: string | null
   openTasks: string[]
   help: WorkflowHelpSnapshot
   plannerOwnerSessionID: string | null
   recovery: WorkflowRecoverySnapshot
+  requestedOperation?: string | null
+  sessionObservation?: SessionObservation | null
   lastDoctorFailure?: { gate: string; output: string } | null
 }
 

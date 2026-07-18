@@ -7,89 +7,164 @@ import type {
 } from "./types.ts"
 
 function action(snapshot: AuthoritativeWorkflowSnapshot): WorkflowAction {
-  const { doctor, recovery, help, openTasks, plannerOwnerSessionID } = snapshot
+  const { role, doctor, recovery, help, openTasks, plannerOwnerSessionID } = snapshot
+  const wait = (code = "workflow.wait", text = role === "unknown"
+    ? "No automatic continuation. Follow the current explicit user request; otherwise stop and wait."
+    : `${role.slice(0, 1).toUpperCase()}${role.slice(1)} must follow the explicit user request or wait.`) => workflowAction(
+      code,
+      role,
+      "wait",
+      text,
+      { taskPath: doctor.taskPath ?? undefined, helpID: help?.id },
+    )
+  const executorOnly = (executorAction: WorkflowAction, code: string, text: string) => {
+    if (role === "executor" || role === "unknown") return executorAction
+    if (role === "worker") {
+      return workflowAction(code, "worker", "return", "Worker must return BLOCKED with Required owner: Executor and stop.", {
+        taskPath: doctor.taskPath ?? undefined,
+        helpID: help?.id,
+      })
+    }
+    return wait(code, text)
+  }
   if (recovery.memory) {
-    return workflowAction(
+    return executorOnly(workflowAction(
       "executor.recover_memory",
       "executor",
       "tool",
       `Executor must read MEMORY.md and call recover_project_memory before delegation or review. Current size ${recovery.memory.size}; limit ${recovery.memory.maxSize}.`,
       { tool: "recover_project_memory" },
-    )
+    ), "planner.wait_memory_recovery", "Planner must leave project-memory recovery to Executor and wait.")
   }
   if (recovery.harness) {
-    return workflowAction(
+    return executorOnly(workflowAction(
       "executor.recover_harness",
       "executor",
       "tool",
-      `Executor must inspect readable Harness paths and call recover_harness_baseline for ${recovery.harness.taskPath} with exactly ${recovery.harness.paths.join(", ")}. WORKER rule files are opaque and must not be read outside Worker.`,
+      `Executor must call recover_harness_baseline for ${recovery.harness.taskPath}. The Harness supplies these exact paths: ${recovery.harness.paths.join(", ")}.`,
       { tool: "recover_harness_baseline", taskPath: recovery.harness.taskPath },
-    )
+    ), "planner.wait_harness_recovery", "Planner must leave Harness recovery to Executor and wait.")
   }
   if (recovery.planner?.status === "unavailable") {
-    return workflowAction(
+    return executorOnly(workflowAction(
       "executor.stop_planner_unavailable",
       "executor",
       "stop",
       `Executor must stop and tell the user that Planner ${recovery.planner.plannerSessionID ?? "none"} is unavailable. The user must open a Planner and correct ${doctor.taskPath ?? "the task"} manually.`,
       { taskPath: doctor.taskPath ?? undefined },
-    )
+    ), "planner.wait_unavailable_recovery", "Planner must follow the explicit user request or wait.")
   }
   if (recovery.planner?.status === "incomplete") {
-    return workflowAction(
+    return executorOnly(workflowAction(
       "executor.stop_planner_incomplete",
       "executor",
       "stop",
       `Executor must stop and tell the user to continue Planner ${recovery.planner.plannerSessionID ?? "none"} manually because recovery did not finish.`,
       { taskPath: doctor.taskPath ?? undefined },
+    ), "planner.wait_incomplete_recovery", "Planner must follow the explicit user request or wait.")
+  }
+  if (snapshot.requestedOperation && (role === "planner" || role === "executor")) {
+    const label = `${role.slice(0, 1).toUpperCase()}${role.slice(1)}`
+    return workflowAction(
+      "project.run_requested_operation",
+      role,
+      "tool",
+      `${label} must run ${snapshot.requestedOperation}.`,
+      { tool: snapshot.requestedOperation },
     )
   }
   if (doctor.status === "started" && doctor.taskPath && help?.status === "pending") {
-    return workflowAction(
+    return executorOnly(workflowAction(
       "executor.review_help",
       "executor",
       "tool",
       `Executor must review Worker help ${help.id} through review_worker_help before delegating another Worker.`,
       { tool: "review_worker_help", taskPath: doctor.taskPath, helpID: help.id },
-    )
+    ), "planner.wait_pending_help", "Planner must not intercept pending Worker help unless the user requests task revision.")
   }
   if (doctor.status === "started" && doctor.taskPath && help?.status === "planner_unavailable") {
-    return workflowAction(
+    return executorOnly(workflowAction(
       "executor.stop_help_planner_unavailable",
       "executor",
       "stop",
       `Executor must stop and tell the user that Planner ${plannerOwnerSessionID ?? "none"} is unavailable. The user must open a Planner and correct ${doctor.taskPath} manually.`,
       { taskPath: doctor.taskPath, helpID: help!.id },
-    )
+    ), "planner.wait_help_owner", "Planner must follow the explicit user request or wait.")
   }
   if (doctor.status === "started" && doctor.taskPath && help?.status === "planner_recovery_incomplete") {
-    return workflowAction(
+    return executorOnly(workflowAction(
       "executor.stop_help_planner_incomplete",
       "executor",
       "stop",
       `Executor must stop and tell the user to continue Planner ${plannerOwnerSessionID ?? "none"} manually because recovery did not finish.`,
       { taskPath: doctor.taskPath, helpID: help!.id },
-    )
+    ), "planner.wait_help_recovery", "Planner must follow the explicit user request or wait.")
   }
   if (doctor.status === "started" && doctor.taskPath && ["retry_approved", "task_changed"].includes(help?.status ?? "")) {
-    return workflowAction(
+    return executorOnly(workflowAction(
       "executor.delegate_reviewed_worker",
       "executor",
-      "continue",
+      "tool",
       `Executor must delegate one fresh Worker for ${doctor.taskPath} with the structured help guidance from ${help!.id}.`,
-      { taskPath: doctor.taskPath, helpID: help!.id },
-    )
+      { tool: "task", taskPath: doctor.taskPath, helpID: help!.id },
+    ), "planner.wait_reviewed_help", "Planner must not delegate the reviewed Worker retry.")
+  }
+  if (doctor.status === "started" && doctor.taskPath && help?.status === "delegated" && help.delegation) {
+    if (role === "executor" || role === "unknown") {
+      if (help.delegation.phase === "reviewable") {
+        return workflowAction(
+          "executor.consume_recovered_handoff",
+          "executor",
+          "continue",
+          `Executor must consume the recovered Worker handoff for ${doctor.taskPath} without starting another Worker.`,
+          { taskPath: doctor.taskPath, helpID: help.id },
+        )
+      }
+      if (help.delegation.phase === "launching") {
+        return workflowAction(
+          "executor.wait_delegation_binding",
+          "executor",
+          "wait",
+          `Executor must wait for the in-flight Worker delegation for ${doctor.taskPath} to bind.`,
+          { taskPath: doctor.taskPath, helpID: help.id },
+        )
+      }
+      return workflowAction(
+        "executor.resume_delegated_worker",
+        "executor",
+        "tool",
+        `Executor must resume the Worker bound to ${doctor.taskPath}; the Harness supplies its session selector.`,
+        { tool: "task", taskPath: doctor.taskPath, helpID: help.id },
+      )
+    }
+    if (role === "planner") return wait("planner.wait_delegated_worker", "Planner must follow the explicit user request or wait while Executor owns the Worker delegation.")
   }
   if (doctor.status === "started" && doctor.taskPath) {
-    return workflowAction(
-      "worker.continue_active_task",
-      "worker",
-      "continue",
-      `Worker must continue only ${doctor.taskPath} through the Doctor lifecycle.`,
-      { taskPath: doctor.taskPath },
+    if (role === "worker" || role === "unknown") return workflowAction(
+        "worker.continue_active_task",
+        "worker",
+        "continue",
+        `Worker must continue only ${doctor.taskPath} through the Doctor lifecycle.`,
+        { taskPath: doctor.taskPath },
+      )
+    if (role === "executor") return workflowAction(
+      "executor.delegate_active_worker",
+      "executor",
+      "tool",
+      `Executor must delegate one Worker for active task ${doctor.taskPath}.`,
+      { tool: "task", taskPath: doctor.taskPath },
     )
+    return wait("planner.wait_active_task", "Planner must follow the explicit user request; Executor owns the active task lifecycle.")
   }
   if (doctor.status === "passed" && doctor.taskPath) {
+    if (role === "worker") return workflowAction(
+      "worker.return_reviewable",
+      "worker",
+      "return",
+      `Worker must return the canonical REVIEWABLE handoff for ${doctor.taskPath}.`,
+      { taskPath: doctor.taskPath },
+    )
+    if (role === "planner") return wait("planner.wait_passed_task", "Planner must leave the technically passed task to Executor review.")
     return workflowAction(
       "executor.complete_passed_task",
       "executor",
@@ -98,7 +173,7 @@ function action(snapshot: AuthoritativeWorkflowSnapshot): WorkflowAction {
       { tool: "submit_task_review", taskPath: doctor.taskPath },
     )
   }
-  if (openTasks.length > 0) {
+  if (openTasks.length > 0 && (role === "executor" || role === "unknown")) {
     return workflowAction(
       "executor.schedule",
       "executor",
@@ -107,12 +182,7 @@ function action(snapshot: AuthoritativeWorkflowSnapshot): WorkflowAction {
       { tool: "npm run task:doctor:schedule" },
     )
   }
-  return workflowAction(
-    "workflow.wait",
-    "unknown",
-    "wait",
-    "No automatic continuation. Follow the current explicit user request; otherwise stop and wait.",
-  )
+  return wait()
 }
 
 export function decideAuthoritativeWorkflow(snapshot: AuthoritativeWorkflowSnapshot): AuthoritativeWorkflowDecision {

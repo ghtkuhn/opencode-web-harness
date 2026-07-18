@@ -33,6 +33,7 @@
     ".opencode/lib/worker-scope-recovery.ts",
     ".opencode/lib/workflow-guard-rules.ts",
     ".opencode/lib/workflow-engine/authoritative-state.ts",
+    ".opencode/lib/workflow-engine/delegation-lease.ts",
     ".opencode/lib/workflow-engine/domain-state.ts",
     ".opencode/lib/workflow-engine/engine.ts",
     ".opencode/lib/workflow-engine/failure-window.ts",
@@ -52,6 +53,7 @@
     ".opencode/plugins/workflow-guard.ts"
   ],
   "packageScripts": {
+    "build": "npm --prefix code/backend run build && npm --prefix code/frontend run build",
     "harness:update": "node scripts/update-harness.mjs",
     "harness:update:check": "node scripts/update-harness.mjs --check",
     "app:status": "node scripts/app-control.mjs status",

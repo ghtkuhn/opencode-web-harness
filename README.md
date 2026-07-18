@@ -44,6 +44,12 @@ npm run setup
 
 This installs the locked Root, Backend, Frontend, and OpenCode dependencies. Existing installations do not need to run it again.
 
+The default root build checks both application workspaces:
+
+```bash
+npm run build
+```
+
 Next, configure `project.json` and start the application:
 
 ```bash
@@ -218,6 +224,7 @@ The Harness derives file existence, canonical Scope and Context, scheduling meta
 ### Application
 
 ```bash
+npm run build
 npm run app:status
 npm run app:start
 npm run app:stop

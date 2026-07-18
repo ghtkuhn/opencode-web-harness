@@ -8,32 +8,32 @@ import type {
   WorkflowRole,
 } from "./types.ts"
 
-const priorityRank: Record<DirectivePriority, number> = {
-  recovery: 700,
-  terminal: 600,
-  help: 500,
-  review: 400,
-  active: 300,
-  schedule: 200,
-  idle: 100,
-}
-
 const roleToolRules: Record<Exclude<WorkflowRole, "unknown">, {
   allowed: RegExp
   forbidden: RegExp
 }> = {
   planner: {
-    allowed: /^(?:register_planner_task|revise_active_task|supersede_registered_task|npm run task:doctor:(?:next|schedule))$/,
-    forbidden: /^(?:submit_task_review|review_worker_help|escalate_to_planner|recover_|preview_worker_changes|apply_worker_changes|verify_worker_task)/,
+    allowed: /^(?:register_planner_task|revise_active_task|supersede_registered_task|npm run task:doctor:next)$/,
+    forbidden: /^(?:task|submit_task_review|review_worker_help|escalate_to_planner|recover_|preview_worker_changes|apply_worker_changes|verify_worker_task)/,
   },
   executor: {
-    allowed: /^(?:submit_task_review|review_worker_help|escalate_to_planner|recover_project_memory|recover_harness_baseline|npm run task:doctor:schedule)$/,
+    allowed: /^(?:task|submit_task_review|review_worker_help|escalate_to_planner|recover_project_memory|recover_harness_baseline|npm run task:doctor:schedule)$/,
     forbidden: /^(?:register_planner_task|revise_active_task|supersede_registered_task|preview_worker_changes|apply_worker_changes|verify_worker_task|npm run task:doctor:(?:lint|register|start|verify|complete))$/,
   },
   worker: {
     allowed: /^(?:append_task_memory|preview_worker_changes|apply_worker_changes|discard_worker_changes|verify_worker_task|request_executor_help|request_task_change_permission|request_command_permission|request_dependency_install_permission|npm run task:doctor:(?:lint|register|start|verify|whitelist|test-file))$/,
-    forbidden: /^(?:submit_task_review|review_worker_help|escalate_to_planner|recover_|register_planner_task|revise_active_task|supersede_registered_task|npm run task:doctor:(?:next|schedule|complete))$/,
+    forbidden: /^(?:task|submit_task_review|review_worker_help|escalate_to_planner|recover_|register_planner_task|revise_active_task|supersede_registered_task|npm run task:doctor:(?:next|schedule|complete))$/,
   },
+}
+
+const priorityOrder: Record<DirectivePriority, number> = {
+  recovery: 7,
+  terminal: 6,
+  help: 5,
+  review: 4,
+  active: 3,
+  schedule: 2,
+  idle: 1,
 }
 
 export function workflowDirective(
@@ -67,6 +67,16 @@ export function directiveFromAction(action: WorkflowAction): WorkflowDirective {
     terminal: action.kind === "stop" || action.kind === "return",
     after: scheduleFollowUp(action),
   })
+}
+
+export function selectWorkflowDirective(...directives: Array<WorkflowDirective | null | undefined>): WorkflowDirective | null {
+  return directives.filter((value): value is WorkflowDirective => Boolean(value)).reduce<WorkflowDirective | null>((selected, candidate) => {
+    if (!selected) return candidate
+    const priority = priorityOrder[candidate.priority] - priorityOrder[selected.priority]
+    if (priority > 0) return candidate
+    if (priority < 0) return selected
+    return (candidate.precedence ?? 0) >= (selected.precedence ?? 0) ? candidate : selected
+  }, null)
 }
 
 export function validateWorkflowDirective(directive: WorkflowDirective): string[] {
@@ -103,21 +113,12 @@ export function roleCapabilityDiagnostics(action: WorkflowAction): string[] {
 
 export function composeWorkflowPrompt(frame: PromptFrame): ComposedWorkflowPrompt {
   const diagnostics: string[] = []
-  const directives = deduplicateDirectives(frame.directives)
-  for (const directive of directives) diagnostics.push(...validateWorkflowDirective(directive).map((value) => `${directive.code}: ${value}`))
-  const ordered = [...directives].sort((left, right) => (
-    priorityRank[right.priority] - priorityRank[left.priority]
-      || (right.precedence ?? 0) - (left.precedence ?? 0)
-      || left.code.localeCompare(right.code)
-  ))
-  const primary = ordered[0] ?? workflowDirective(
-    workflowAction("workflow.wait", "unknown", "wait", "Wait for an explicit user request."),
-    { priority: "idle" },
-  )
-  const samePriority = ordered.filter((directive) => directive.priority === primary.priority
-    && (directive.precedence ?? 0) === (primary.precedence ?? 0))
-  if (samePriority.some((directive) => !equivalentDirective(primary, directive))) {
-    diagnostics.push(`multiple primary directives at ${primary.priority}: ${samePriority.map((value) => value.code).join(", ")}`)
+  const primary = frame.directive.role === "unknown" && frame.role !== "unknown"
+    ? { ...frame.directive, role: frame.role }
+    : frame.directive
+  diagnostics.push(...validateWorkflowDirective(primary).map((value) => `${primary.code}: ${value}`))
+  if (frame.role !== "unknown" && primary.role !== frame.role) {
+    diagnostics.push(`primary role ${primary.role} differs from frame role ${frame.role}`)
   }
   const after = primary.terminal ? undefined : primary.after
   if (frame.taskPath && primary.taskPath && frame.taskPath !== primary.taskPath) diagnostics.push("primary task path differs from frame task path")
@@ -175,7 +176,7 @@ function inferredPriority(action: WorkflowAction): DirectivePriority {
 }
 
 function knownWorkflowTool(tool: string): boolean {
-  return /^(?:register_planner_task|revise_active_task|supersede_registered_task|submit_task_review|review_worker_help|escalate_to_planner|recover_|append_task_memory|preview_worker_changes|apply_worker_changes|discard_worker_changes|verify_worker_task|request_|npm run task:doctor:)/.test(tool)
+  return /^(?:task|register_planner_task|revise_active_task|supersede_registered_task|submit_task_review|review_worker_help|escalate_to_planner|recover_|append_task_memory|preview_worker_changes|apply_worker_changes|discard_worker_changes|verify_worker_task|request_|npm run task:doctor:)/.test(tool)
 }
 
 function scheduleFollowUp(action: WorkflowAction): WorkflowAction | undefined {
@@ -187,26 +188,7 @@ function scheduleFollowUp(action: WorkflowAction): WorkflowAction | undefined {
       "Executor must delegate the READY task to Worker.",
     )
   }
-  if (action.code === "planner.schedule_once") {
-    return workflowAction(
-      "planner.schedule_once.stop",
-      "planner",
-      "stop",
-      "Planner must stop and return the READY result to Executor.",
-    )
-  }
   return undefined
-}
-
-function deduplicateDirectives(values: WorkflowDirective[]): WorkflowDirective[] {
-  const unique = new Map<string, WorkflowDirective>()
-  for (const value of values) unique.set(JSON.stringify([value.code, value.role, value.kind, value.tool, value.taskPath, value.helpID, value.text]), value)
-  return [...unique.values()]
-}
-
-function equivalentDirective(left: WorkflowDirective, right: WorkflowDirective): boolean {
-  return left.role === right.role && left.kind === right.kind && left.tool === right.tool
-    && left.taskPath === right.taskPath && left.helpID === right.helpID && left.text === right.text
 }
 
 function normalizedLines(values: string[]): string[] {

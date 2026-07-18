@@ -1,7 +1,24 @@
 export type WorkerHelpStatus = "pending" | "retry_approved" | "task_changed" | "planner_unavailable" | "planner_recovery_incomplete" | "delegated" | "resolved" | "obsolete"
 
-export type WorkerHelpRequest = {
+export type DelegationLeasePhase = "launching" | "running" | "reviewable" | "retryable" | "closed"
+
+export type DelegationLease = {
   version: 1
+  phase: DelegationLeasePhase
+  taskPath: string
+  taskHash: string
+  helpID: string
+  priorStatus: "retry_approved" | "task_changed"
+  parentSessionID?: string
+  workerSessionID?: string
+  callID?: string
+  source?: "direct" | "mechanical"
+  revision: number
+  updatedAt: string
+}
+
+export type WorkerHelpRequest = {
+  version: 1 | 2
   id: string
   status: WorkerHelpStatus
   taskPath: string
@@ -32,6 +49,7 @@ export type WorkerHelpRequest = {
   delegationCallID?: string
   delegationSource?: "direct" | "mechanical"
   delegationAttemptNonce?: string
+  delegation?: DelegationLease
   recoveryBoost?: {
     phase: "active" | "cleared" | "base_continuation_started" | "base_continuation_completed"
     hurdleTarget?: string
@@ -51,13 +69,54 @@ export type WorkerHelpRequest = {
     baseContinuationDeliveredAt?: string
   }
   closedAt?: string
-  closureReason?: "task_completed" | "task_superseded" | "task_hash_replaced" | "scope_baseline_recovered"
+  closureReason?: "task_completed" | "task_superseded" | "task_hash_replaced" | "scope_baseline_recovered" | "superseded_help_request"
 }
 
 export type WorkerHelpStore = {
-  version: 1
+  version: 1 | 2
   requests: WorkerHelpRequest[]
   updatedAt: string
+}
+
+export function reviewableWorkerHelpRequests(
+  requests: WorkerHelpRequest[],
+  taskPath: string,
+  taskHash: string,
+) {
+  return requests.filter((request) => request.taskPath === taskPath
+    && request.taskHash === taskHash
+    && (request.status === "pending"
+      || (request.status === "retry_approved" && !request.delegatedWorkerSessionID)))
+}
+
+export function selectWorkerHelpForReview(
+  requests: WorkerHelpRequest[],
+  taskPath: string,
+  taskHash: string,
+  helpID?: string | null,
+) {
+  const reviewable = reviewableWorkerHelpRequests(requests, taskPath, taskHash)
+  if (helpID) return reviewable.find((request) => request.id.toLowerCase() === helpID.toLowerCase()) ?? null
+  const newest = (values: WorkerHelpRequest[]) => [...values].sort((left, right) => (
+    right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id, undefined, { numeric: true })
+  ))[0] ?? null
+  return newest(reviewable.filter((request) => request.status === "pending")) ?? newest(reviewable)
+}
+
+export function supersedeCompetingWorkerHelp(
+  requests: WorkerHelpRequest[],
+  selectedID: string,
+  closedAt: string,
+) {
+  const selected = requests.find((request) => request.id === selectedID)
+  if (!selected) return requests
+  return requests.map((request) => request.id !== selectedID
+    && request.taskPath === selected.taskPath
+    && request.taskHash === selected.taskHash
+    && (request.status === "pending"
+      || (request.status === "retry_approved" && !request.delegatedWorkerSessionID))
+    ? { ...request, status: "obsolete" as const, closedAt, closureReason: "superseded_help_request" as const }
+    : request)
 }
 
 export type LoopFailureFingerprint = {
@@ -329,7 +388,7 @@ function failureTarget(tool: string, input: Record<string, unknown>) {
 }
 
 export function loopFailureFingerprint(tool: string, input: Record<string, unknown>, error: string): LoopFailureFingerprint | null {
-  if (!monitoredTools.has(tool) || !error.trim()) return null
+  if (!monitoredTools.has(tool) || !error.trim() || /^WORKFLOW CONTROL\b/i.test(error.trim())) return null
   const target = failureTarget(tool, input)
   const category = failureCategory(tool, error)
   const evidence = error.replace(/\u001b\[[0-9;]*m/g, "").replace(/\s+/g, " ").trim().slice(0, 700)

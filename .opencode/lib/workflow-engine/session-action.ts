@@ -16,7 +16,6 @@ export type SessionActionInput = {
   pendingHelpReviewID?: string | null
   requestedHelpReReviewID?: string | null
   plannerRecoveryRequest?: { taskPath: string; frozen: boolean } | null
-  plannerHasRegisteredTasks: boolean
   scheduledReadyTask?: string | null
   executorScheduleRequired: boolean
 }
@@ -61,15 +60,6 @@ export function decideSessionAction(input: SessionActionInput): WorkflowAction |
       "tool",
       `Executor must call escalate_to_planner for ${input.plannerRecoveryRequest.taskPath} ${suffix}. Do not schedule or delegate until it completes.`,
       { tool: "escalate_to_planner", taskPath: input.plannerRecoveryRequest.taskPath },
-    )
-  }
-  if (input.role === "planner" && input.plannerHasRegisteredTasks) {
-    return workflowAction(
-      "planner.schedule_once",
-      "planner",
-      "tool",
-      "Planner must run npm run task:doctor:schedule once.",
-      { tool: "npm run task:doctor:schedule" },
     )
   }
   if (input.role === "executor" && input.scheduledReadyTask) {
